@@ -934,3 +934,22 @@ fn layers_panel_mask_target_isolates_the_curve_channel() {
     let row = isolated_curve_channel_for(s.active().unwrap(), true).expect("quick mask wins");
     assert_eq!((row.name.as_str(), row.gray), ("Quick Mask", Some(GraySurface::QuickMask)));
 }
+
+#[test]
+fn opening_document_with_quick_mask_initializes_hidden_and_inactive() {
+    let mut s = session();
+    s.execute("select.rect", json!({"x": 5, "y": 5, "width": 10, "height": 10})).unwrap();
+    s.execute("select.editInQuickMaskMode", json!({"on": true})).unwrap();
+    let doc = s.active().unwrap().doc.as_ref().clone();
+    assert!(doc.quick_mask.is_some());
+
+    let state = crate::DocState::new(doc, None);
+    assert!(state.channel_view.quick_mask_hidden, "quick mask must initialize hidden on open");
+
+    let mut s2 = Session::new();
+    s2.add_document(state.doc.as_ref().clone(), None);
+    assert!(s2.active().unwrap().channel_view.quick_mask_hidden);
+    let injected = crate::channel_cmds::inject_target(&s2, "paint.brush", json!({}));
+    assert_ne!(injected.get("target"), Some(&json!("quickMask")));
+    assert!(!crate::channel_cmds::edits_channel(&s2));
+}

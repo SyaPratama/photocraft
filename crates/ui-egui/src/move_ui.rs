@@ -126,6 +126,15 @@ pub(crate) fn display_doc(app: &mut PhotocraftApp, idx: usize) -> Option<(Arc<Do
     let mask_target = app.layer_mask_targeted();
     let st = app.session.documents().get(idx)?;
     let (doc_id, revision, doc) = (st.doc.id, st.revision, st.doc.clone());
+    if app.gpu.as_ref().is_some_and(|g| !g.fits_canvas(&doc)) {
+        return None;
+    }
+    if doc.layers.len() >= 50 {
+        return None;
+    }
+    if app.gpu.is_none() && doc.size.width as u64 * doc.size.height as u64 >= 4_000_000 {
+        return None;
+    }
     let fresh = app.move_preview.as_ref().is_some_and(|p| p.doc == doc_id && p.revision == revision);
     if !fresh {
         let ids = photocraft_engine::layer_multi_cmds::move_targets(&doc, &st.selected_layers());
@@ -140,6 +149,9 @@ pub(crate) fn display_doc(app: &mut PhotocraftApp, idx: usize) -> Option<(Arc<Do
         app.move_preview = Some(MovePreview { doc: doc_id, revision, ids, moving, bounds, canvas, offsets: Vec::new(), shown: None, floating: false });
     }
     let p = app.move_preview.as_mut()?;
+    if p.bounds.is_some_and(|b| b.width() as u64 * b.height() as u64 >= 4_000_000) {
+        return None;
+    }
     if offset == (0, 0) && p.offsets.is_empty() {
         return None;
     }
@@ -611,5 +623,78 @@ mod tests {
         assert!(super::display_doc(&mut app, 0).is_some(), "preview is shown once offset is non-zero");
         crate::canvas::tool_event(&mut app, ToolEvent::Up { x: 18.0, y: 17.0 }, m);
         assert_eq!(offset(&app), Some((2, 1)));
+    }
+
+    #[test]
+    fn dense_layer_stack_or_huge_document_bypasses_live_recomposite_in_display_doc() {
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+        app.session.execute("file.new", json!({"width": 64, "height": 64})).unwrap();
+        app.sync_views();
+        for _ in 0..52 {
+            app.session.execute("layer.new.layer", json!({})).unwrap();
+        }
+        app.session
+            .edit("paint", |doc, a| {
+                doc.layer_mut(a.unwrap()).unwrap().surface_mut().unwrap().fill_rect(Rect::new(0, 0, 10, 10), &[1.0, 0.0, 0.0, 1.0]);
+                Ok(())
+            })
+            .unwrap();
+        app.ui.tool = Tool::Move;
+        app.ui.extras.snap = false;
+        app.ui.view.show.smart_guides = false;
+        let m = egui::Modifiers::NONE;
+        crate::canvas::tool_event(&mut app, ToolEvent::Down { x: 5.0, y: 5.0, pressure: 1.0 }, m);
+        crate::canvas::tool_event(&mut app, ToolEvent::Move { x: 15.0, y: 5.0, pressure: 1.0 }, m);
+        assert!(super::display_doc(&mut app, 0).is_none(), "dense layer stack bypasses display_doc");
+        crate::canvas::tool_event(&mut app, ToolEvent::Up { x: 15.0, y: 5.0 }, m);
+        let id = app.session.active().unwrap().active_layer.unwrap();
+        let b = app.session.active().unwrap().doc.layer(id).unwrap().surface().unwrap().content_bounds();
+        assert_eq!(b.x0, 10);
+
+        let mut app2 = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+        app2.session.execute("file.new", json!({"width": 2000, "height": 2000})).unwrap();
+        app2.sync_views();
+        app2.session.execute("layer.new.layer", json!({})).unwrap();
+        app2.session
+            .edit("paint", |doc, a| {
+                doc.layer_mut(a.unwrap()).unwrap().surface_mut().unwrap().fill_rect(Rect::new(0, 0, 10, 10), &[1.0, 0.0, 0.0, 1.0]);
+                Ok(())
+            })
+            .unwrap();
+        app2.ui.tool = Tool::Move;
+        app2.ui.extras.snap = false;
+        app2.ui.view.show.smart_guides = false;
+        crate::canvas::tool_event(&mut app2, ToolEvent::Down { x: 5.0, y: 5.0, pressure: 1.0 }, m);
+        crate::canvas::tool_event(&mut app2, ToolEvent::Move { x: 25.0, y: 5.0, pressure: 1.0 }, m);
+        assert!(super::display_doc(&mut app2, 0).is_none(), ">= 4 MP canvas bypasses display_doc");
+        crate::canvas::tool_event(&mut app2, ToolEvent::Up { x: 25.0, y: 5.0 }, m);
+        let id2 = app2.session.active().unwrap().active_layer.unwrap();
+        let b2 = app2.session.active().unwrap().doc.layer(id2).unwrap().surface().unwrap().content_bounds();
+        assert_eq!(b2.x0, 20);
+    }
+
+    #[test]
+    fn huge_layer_bounds_bypasses_live_recomposite_in_display_doc() {
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+        app.session.execute("file.new", json!({"width": 500, "height": 500})).unwrap();
+        app.sync_views();
+        app.session.execute("layer.new.layer", json!({})).unwrap();
+        app.session
+            .edit("paint", |doc, a| {
+                doc.layer_mut(a.unwrap()).unwrap().surface_mut().unwrap().fill_rect(Rect::new(0, 0, 2000, 2000), &[1.0, 0.0, 0.0, 1.0]);
+                Ok(())
+            })
+            .unwrap();
+        app.ui.tool = Tool::Move;
+        app.ui.extras.snap = false;
+        app.ui.view.show.smart_guides = false;
+        let m = egui::Modifiers::NONE;
+        crate::canvas::tool_event(&mut app, ToolEvent::Down { x: 50.0, y: 50.0, pressure: 1.0 }, m);
+        crate::canvas::tool_event(&mut app, ToolEvent::Move { x: 60.0, y: 50.0, pressure: 1.0 }, m);
+        assert!(super::display_doc(&mut app, 0).is_none(), ">= 4 MP bounds bypasses display_doc");
+        crate::canvas::tool_event(&mut app, ToolEvent::Up { x: 60.0, y: 50.0 }, m);
+        let id = app.session.active().unwrap().active_layer.unwrap();
+        let b = app.session.active().unwrap().doc.layer(id).unwrap().surface().unwrap().content_bounds();
+        assert_eq!(b.x0, 10);
     }
 }

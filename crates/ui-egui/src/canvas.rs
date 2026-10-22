@@ -4969,6 +4969,9 @@ fn transform_controls_layers(app: &PhotocraftApp) -> Vec<&photocraft_doc::Layer>
         return Vec::new();
     }
     let Some(st) = app.session.active() else { return Vec::new() };
+    if st.doc.quick_mask.is_some() && !st.channel_view.quick_mask_hidden {
+        return Vec::new();
+    }
     st.selected_layers().into_iter().filter_map(|id| st.doc.layer(id)).filter(|l| !crate::doc_props_ui::is_background(&st.doc, l)).collect()
 }
 
@@ -5050,7 +5053,7 @@ fn begin_transform_controls_at(app: &mut PhotocraftApp, ctx: &egui::Context, xf:
     if !transform_controls_hit(r, p) {
         return false;
     }
-    match crate::transform_tool::begin(app, ctx) {
+    match crate::transform_tool::begin_layer(app, ctx) {
         Ok(()) => true,
         Err(e) => {
             app.ui.status = e;
@@ -5209,11 +5212,34 @@ fn draw_drag_preview(app: &mut PhotocraftApp, painter: &egui::Painter, xf: &View
             painter.add(egui::Shape::line(pts.to_vec(), Stroke::new(1.0, Color32::WHITE)));
             painter.add(egui::Shape::dashed_line(&pts, Stroke::new(1.0, Color32::BLACK), 3.0, 3.0));
         }
-        // The layers themselves follow the pointer (`move_ui`); the arrow only when they can't.
+        // The layers themselves follow the pointer (`move_ui`); outline and arrow only when they can't.
         Tool::Move if !crate::move_ui::showing(app) => {
             let from = xf.to_screen(d.start[0] as f32, d.start[1] as f32);
             let off = xf.to_screen(last[0] as f32, last[1] as f32) - from;
-            painter.arrow(from, off, Stroke::new(2.0, crate::theme::Tokens::get(painter.ctx()).accent));
+            let accent = crate::theme::Tokens::get(painter.ctx()).accent;
+            painter.arrow(from, off, Stroke::new(2.0, accent));
+            if let Some(st) = app.session.active() {
+                let ids = photocraft_engine::layer_multi_cmds::move_targets(&st.doc, &st.selected_layers());
+                let b = ids
+                    .iter()
+                    .filter_map(|id| st.doc.layer(*id))
+                    .map(|l| {
+                        photocraft_compose::composite_bounds(l, st.doc.bounds())
+                            .or_else(|| l.surface().map(photocraft_compose::bounds::content_bounds))
+                            .unwrap_or_else(|| photocraft_engine::transform_cmds::transform_frame(&st.doc, l))
+                    })
+                    .filter(|b| !b.is_empty())
+                    .reduce(|a, b| a.union(&b));
+                if let Some(b) = b {
+                    let dx = (last[0] - d.start[0]).round().clamp(-1e7, 1e7) as i32;
+                    let dy = (last[1] - d.start[1]).round().clamp(-1e7, 1e7) as i32;
+                    let b = b.translate(dx, dy);
+                    if !b.is_empty() {
+                        let r = xf.doc_rect(b);
+                        painter.rect_stroke(r, 0.0, Stroke::new(1.5, accent), egui::StrokeKind::Middle);
+                    }
+                }
+            }
         }
         _ => {}
     }
@@ -6301,7 +6327,7 @@ pub fn paint_target(app: &PhotocraftApp) -> serde_json::Value {
     // A targeted alpha channel (Channels panel) or Quick Mask mode wins over the layer.
     match st.channel_view.target {
         ChannelTarget::Alpha(i) if i < st.doc.channels.len() => return json!({ "channel": i }),
-        ChannelTarget::Composite if st.doc.quick_mask.is_some() => return json!("quickMask"),
+        ChannelTarget::Composite if st.doc.quick_mask.is_some() && !st.channel_view.quick_mask_hidden => return json!("quickMask"),
         ChannelTarget::LayerMask => return json!("mask"),
         _ => {}
     }
@@ -9067,3 +9093,43 @@ mod display_memo_tests;
 #[cfg(test)]
 #[path = "canvas/blend_viewport_tests.rs"]
 mod blend_viewport_regression;
+
+#[cfg(test)]
+mod quick_mask_overlay_tests {
+    use super::*;
+
+    #[test]
+    fn quick_mask_opens_hidden_and_does_not_hijack_tools_or_transform() {
+        let mut session = photocraft_engine::Session::new();
+        session.execute("file.new", json!({"width": 64, "height": 64})).unwrap();
+        session.execute("layer.new.layer", json!({})).unwrap();
+        session
+            .edit("paint", |doc, a| {
+                doc.layer_mut(a.unwrap()).unwrap().surface_mut().unwrap().fill_rect(photocraft_geom::Rect::new(10, 10, 30, 30), &[1.0, 0.0, 0.0, 1.0]);
+                Ok(())
+            })
+            .unwrap();
+        session.execute("select.rect", json!({"x": 10, "y": 10, "width": 20, "height": 20})).unwrap();
+        session.execute("select.editInQuickMaskMode", json!({"on": true})).unwrap();
+        let mut app = PhotocraftApp::new(session, crate::Services::default());
+        let st = app.session.active_mut().unwrap();
+        st.channel_view.quick_mask_hidden = true;
+
+        assert_eq!(paint_target(&app), json!("pixels"));
+
+        app.ui.tool = Tool::Move;
+        app.ui.tool_options.move_show_transform = true;
+        let layers = transform_controls_layers(&app);
+        assert_eq!(layers.len(), 1);
+
+        let ctx = egui::Context::default();
+        crate::transform_tool::begin_layer(&mut app, &ctx).unwrap();
+        let t = app.ui.transform.as_ref().unwrap();
+        assert_eq!(t.layer, app.session.active().unwrap().active_layer.unwrap().0);
+
+        app.run("select.editInQuickMaskMode", json!({"on": true})).unwrap();
+        assert!(!app.session.active().unwrap().channel_view.quick_mask_hidden);
+        assert_eq!(paint_target(&app), json!("quickMask"));
+        assert!(transform_controls_layers(&app).is_empty(), "layer transform controls hidden when quick mask visible");
+    }
+}
