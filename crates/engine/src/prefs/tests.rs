@@ -960,7 +960,7 @@ fn a_wrongly_typed_value_resets_only_that_field() {
         )
         .unwrap();
     assert!(s.prefs().general.beep_when_done);
-    assert_eq!(s.prefs().file_handling.autosave_interval_secs, 300, "a sibling in the same section survives");
+    assert_eq!(s.prefs().file_handling.autosave_minutes, 5, "a sibling in the same section survives");
     assert_eq!(s.prefs().file_handling.recent_file_count, 20, "the bad value takes the default");
     assert_eq!(s.prefs().performance.history_states, 20);
     assert_eq!(s.prefs().shortcuts.get("edit.fill").map(String::as_str), Some("Cmd+Shift+F"));
@@ -971,17 +971,17 @@ fn a_wrongly_typed_value_resets_only_that_field() {
     assert_eq!(invalid[1].keys, ["shortcuts", "file.open"]);
 }
 #[test]
-fn autosave_migration_and_interval_secs() {
+fn autosave_migration_and_minutes() {
     let mut s = Session::new();
-    s.load_prefs_json(r#"{"fileHandling": {"autosaveMinutes": 10}}"#).unwrap();
-    assert_eq!(s.prefs().file_handling.autosave_interval_secs, 600);
+    s.load_prefs_json(r#"{"fileHandling": {"autosaveIntervalSecs": 600}}"#).unwrap();
+    assert_eq!(s.prefs().file_handling.autosave_minutes, 10);
 
-    s.execute("prefs.set", json!({"path": "fileHandling.autosaveIntervalSecs", "value": 30})).unwrap();
-    assert_eq!(s.prefs().file_handling.autosave_interval_secs, 30);
+    s.execute("prefs.set", json!({"path": "fileHandling.autosaveMinutes", "value": 15})).unwrap();
+    assert_eq!(s.prefs().file_handling.autosave_minutes, 15);
 
-    // Setting via legacy path converts minutes to seconds
-    s.execute("prefs.set", json!({"path": "fileHandling.autosaveMinutes", "value": 2})).unwrap();
-    assert_eq!(s.prefs().file_handling.autosave_interval_secs, 120);
+    // Setting via legacy seconds path converts seconds to minutes
+    s.execute("prefs.set", json!({"path": "fileHandling.autosaveIntervalSecs", "value": 120})).unwrap();
+    assert_eq!(s.prefs().file_handling.autosave_minutes, 2);
 }
 
 #[test]

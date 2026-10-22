@@ -449,8 +449,8 @@ pub struct FileHandling {
     pub save_in_background: bool,
     /// Save recovery information (crash recovery autosave).
     pub autosave: bool,
-    /// Seconds between autosaves of documents with unsaved changes.
-    pub autosave_interval_secs: u32,
+    /// Minutes between autosaves of documents with unsaved changes.
+    pub autosave_minutes: u32,
     /// Offer to reopen recovered documents at launch.
     pub recover_on_launch: bool,
     /// Open a file with no ICC profile as untagged even when its EXIF ColorSpace tag says sRGB.
@@ -474,7 +474,7 @@ impl Default for FileHandling {
             lowercase_extension: true,
             save_in_background: true,
             autosave: true,
-            autosave_interval_secs: 600,
+            autosave_minutes: 10,
             recover_on_launch: true,
             ignore_exif_profile_tag: false,
             exr_aces_cg: false,
@@ -1135,7 +1135,6 @@ pub fn choices(path: &str) -> Option<&'static [&'static str]> {
 pub fn range(path: &str) -> Option<(f64, f64)> {
     Some(match path {
         "fileHandling.autosaveMinutes" => (1.0, 240.0),
-        "fileHandling.autosaveIntervalSecs" => (5.0, 14400.0),
         "fileHandling.recentFileCount" => (0.0, 100.0),
         "tools.nudgeBundlePauseMs" => (100.0, 10_000.0),
         "fileHandling.rasterizeSvgGroupsDeeperThan" => (0.0, photocraft_doc::MAX_GROUP_DEPTH as f64),
@@ -1342,9 +1341,9 @@ impl Preferences {
             }
             _ => value,
         };
-        let (path, value) = if path == "fileHandling.autosaveMinutes" {
-            let secs = value.as_f64().map(|m| (m * 60.0).round() as u64).unwrap_or(600);
-            ("fileHandling.autosaveIntervalSecs", json!(secs))
+        let (path, value) = if path == "fileHandling.autosaveIntervalSecs" {
+            let mins = value.as_f64().map(|s| (s / 60.0).round().max(1.0) as u64).unwrap_or(10);
+            ("fileHandling.autosaveMinutes", json!(mins))
         } else {
             (path, value)
         };
@@ -1805,12 +1804,12 @@ impl Session {
         }
         // Saved preferences before appearance modes had one concrete theme. Preserve its
         // appearance instead of silently switching established users to Auto.
-        // Migrate legacy autosaveMinutes to autosaveIntervalSecs (minutes -> seconds).
+        // Migrate legacy autosaveIntervalSecs to autosaveMinutes (seconds -> minutes).
         if let Some(fh) = v.get_mut("fileHandling").and_then(Value::as_object_mut)
-            && !fh.contains_key("autosaveIntervalSecs")
-            && let Some(minutes) = fh.remove("autosaveMinutes").and_then(|m| m.as_u64())
+            && !fh.contains_key("autosaveMinutes")
+            && let Some(secs) = fh.remove("autosaveIntervalSecs").and_then(|s| s.as_u64())
         {
-            fh.insert("autosaveIntervalSecs".into(), json!(minutes.saturating_mul(60)));
+            fh.insert("autosaveMinutes".into(), json!((secs / 60).max(1)));
         }
         if let Some(interface) = v.get_mut("interface").and_then(Value::as_object_mut)
             && !interface.contains_key("appearanceMode")
@@ -1857,10 +1856,10 @@ impl Session {
     /// Batches defer colour validation until their complete candidate is staged. Returns
     /// whether colour settings were touched, including whole-section/root-object updates.
     fn set_pref(&mut self, path: &str, value: Value, validate_color: bool) -> std::result::Result<bool, String> {
-        // Legacy autosaveMinutes path redirect.
-        if path == "fileHandling.autosaveMinutes" {
-            let secs = value.as_f64().map(|m| (m * 60.0).round() as u64).unwrap_or(600);
-            return self.set_pref("fileHandling.autosaveIntervalSecs", json!(secs), validate_color);
+        // Legacy autosaveIntervalSecs path redirect.
+        if path == "fileHandling.autosaveIntervalSecs" {
+            let mins = value.as_f64().map(|s| (s / 60.0).round().max(1.0) as u64).unwrap_or(10);
+            return self.set_pref("fileHandling.autosaveMinutes", json!(mins), validate_color);
         }
         if let Some(rest) = path.strip_prefix("colorSettings") {
             let mut cur = serde_json::to_value(&self.color.settings).map_err(|e| e.to_string())?;

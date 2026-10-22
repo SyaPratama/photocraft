@@ -39,6 +39,8 @@ pub const INTEL: u32 = 0x8086;
 pub const QUALCOMM: u32 = 0x5143;
 /// Qualcomm's vendor id as DXGI (DX12) reports it: "QCOM".
 pub const QUALCOMM_DXGI: u32 = 0x4D4F_4351;
+/// PCI vendor id of AMD.
+pub const AMD: u32 = 0x1002;
 /// Largest marker read (a marker is a few hundred bytes).
 const MARKER_MAX: u64 = 64 << 10;
 
@@ -256,6 +258,7 @@ fn dx12_first_on_windows(vendor: u32) -> Option<&'static str> {
     match vendor {
         INTEL => Some("Intel"),
         QUALCOMM | QUALCOMM_DXGI => Some("Qualcomm"),
+        AMD => Some("AMD"),
         _ => None,
     }
 }
@@ -832,6 +835,17 @@ mod tests {
         assert_eq!(adreno[pick(&adreno, Auto, Os::Other).unwrap()].backend, B::Vulkan);
     }
 
+    #[test]
+    fn amd_on_windows_defaults_to_dx12() {
+        use wgpu::{Backend as B, DeviceType as T};
+        let amd = [cand(AMD, T::IntegratedGpu, B::Vulkan), cand(AMD, T::IntegratedGpu, B::Dx12)];
+        let i = pick(&amd, Auto, Os::Windows).unwrap();
+        assert_eq!(amd[i].backend, B::Dx12);
+        assert_eq!(dx12_default_applied(&amd, i, Os::Windows, false), Some("AMD"));
+        // Elsewhere Vulkan stays first.
+        assert_eq!(amd[pick(&amd, Auto, Os::Other).unwrap()].backend, B::Vulkan);
+    }
+
     /// #4: an instance with Vulkan loads the Intel Vulkan driver, which crashed at startup, before
     /// the selector picks Intel's DX12 adapter. With an Intel adapter in the DX12 list, `auto` on
     /// Windows creates the instance without Vulkan.
@@ -839,7 +853,6 @@ mod tests {
     fn auto_on_windows_with_an_intel_adapter_leaves_vulkan_out_of_the_instance() {
         use wgpu::{Backend as B, DeviceType as T};
         const NVIDIA: u32 = 0x10de;
-        const AMD: u32 = 0x1002;
         const WARP: u32 = 0x1414;
         let auto = plan(Auto, None, None, false, Os::Windows);
         let dx12_gl = Some(wgpu::Backends::DX12 | wgpu::Backends::GL);
