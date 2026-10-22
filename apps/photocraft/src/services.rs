@@ -86,6 +86,7 @@ fn open_filters() -> Vec<(&'static str, Vec<String>)> {
 const SAVE_FILTERS: &[(&str, &[&str])] = &[
     ("PSD Document", &["psd", "psb"]),
     ("PDF", &["pdf"]),
+    ("SVG", &["svg", "svgz"]),
     ("PhotoCraft", &["pcraft"]),
     ("OpenRaster", &["ora"]),
     ("PNG", &["png"]),
@@ -970,7 +971,7 @@ mod tests {
     #[test]
     fn save_as_offers_only_writable_formats_including_ico() {
         // Layered formats, and PDF, are written by `photocraft-io`, not a codec.
-        let layered = ["psd", "psb", "pcraft", "ora", "pdf"];
+        let layered = ["psd", "psb", "pcraft", "ora", "pdf", "svg", "svgz"];
         for (name, exts) in SAVE_FILTERS {
             for ext in exts.iter().filter(|e| !layered.contains(e)) {
                 let format = photocraft_codecs::from_extension(ext).unwrap_or_else(|| panic!("{name}: .{ext} is no known format"));

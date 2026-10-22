@@ -69,6 +69,7 @@ pub mod raw;
 pub mod slices_map;
 pub mod smart_map;
 pub mod svg;
+pub mod svg_export;
 mod text_import;
 pub mod text_styles_map;
 pub mod tiff_layers;
@@ -480,6 +481,12 @@ fn export_stages(doc: &Document, name_or_ext: &str, opts: &ExportOptions, ctl: &
     }
     if ext == "pdf" {
         return pdf::export(doc);
+    }
+    if ext == "svg" {
+        return svg_export::export(doc);
+    }
+    if ext == "svgz" {
+        return svg_export::export_svgz(doc);
     }
     if ext == photocraft_format::EXTENSION {
         let doc = named_for_file(doc, name_or_ext);

@@ -82,6 +82,10 @@ choice!(
     /// platforms ignore it.
     LinuxDisplayServer { Auto = "auto", X11 = "x11" } default Auto
 );
+choice!(
+    /// Unit for the autosave interval in the Preferences dialog.
+    AutosaveUnit { Seconds = "seconds", Minutes = "minutes" } default Minutes
+);
 choice!(UiFontSize { Tiny = "tiny", Small = "small", Medium = "medium", Large = "large" } default Small);
 choice!(LogDestination { Metadata = "metadata", TextFile = "textFile", Both = "both" } default Metadata);
 choice!(LogDetail { SessionsOnly = "sessionsOnly", Concise = "concise", Detailed = "detailed" } default Concise);
@@ -449,8 +453,10 @@ pub struct FileHandling {
     pub save_in_background: bool,
     /// Save recovery information (crash recovery autosave).
     pub autosave: bool,
-    /// Minutes between autosaves of documents with unsaved changes.
-    pub autosave_minutes: u32,
+    /// Seconds between autosaves of documents with unsaved changes.
+    pub autosave_interval_secs: u32,
+    /// Display unit for the autosave interval in the Preferences dialog.
+    pub autosave_unit: AutosaveUnit,
     /// Offer to reopen recovered documents at launch.
     pub recover_on_launch: bool,
     /// Open a file with no ICC profile as untagged even when its EXIF ColorSpace tag says sRGB.
@@ -474,7 +480,8 @@ impl Default for FileHandling {
             lowercase_extension: true,
             save_in_background: true,
             autosave: true,
-            autosave_minutes: 10,
+            autosave_interval_secs: 600,
+            autosave_unit: AutosaveUnit::Minutes,
             recover_on_launch: true,
             ignore_exif_profile_tag: false,
             exr_aces_cg: false,
@@ -1106,6 +1113,7 @@ pub fn choices(path: &str) -> Option<&'static [&'static str]> {
         "interface.uiFontSize" => UiFontSize::NAMES,
         "historyLog.destination" => LogDestination::NAMES,
         "historyLog.detail" => LogDetail::NAMES,
+        "fileHandling.autosaveUnit" => AutosaveUnit::NAMES,
         "fileHandling.imagePreviews" | "fileHandling.maximizePsdCompatibility" => Ask::NAMES,
         "export.quickExportFormat" => QuickExportFormat::NAMES,
         "export.quickExportLocation" => ExportLocation::NAMES,
@@ -1135,6 +1143,7 @@ pub fn choices(path: &str) -> Option<&'static [&'static str]> {
 pub fn range(path: &str) -> Option<(f64, f64)> {
     Some(match path {
         "fileHandling.autosaveMinutes" => (1.0, 240.0),
+        "fileHandling.autosaveIntervalSecs" => (5.0, 14400.0),
         "fileHandling.recentFileCount" => (0.0, 100.0),
         "tools.nudgeBundlePauseMs" => (100.0, 10_000.0),
         "fileHandling.rasterizeSvgGroupsDeeperThan" => (0.0, photocraft_doc::MAX_GROUP_DEPTH as f64),
@@ -1340,6 +1349,12 @@ impl Preferences {
                 return Ok(());
             }
             _ => value,
+        };
+        let (path, value) = if path == "fileHandling.autosaveMinutes" {
+            let secs = value.as_f64().map(|m| (m * 60.0).round() as u64).unwrap_or(600);
+            ("fileHandling.autosaveIntervalSecs", json!(secs))
+        } else {
+            (path, value)
         };
         check_value(path, &value)?;
         let mut root = self.to_json();
@@ -1798,6 +1813,13 @@ impl Session {
         }
         // Saved preferences before appearance modes had one concrete theme. Preserve its
         // appearance instead of silently switching established users to Auto.
+        // Migrate legacy autosaveMinutes to autosaveIntervalSecs (minutes -> seconds).
+        if let Some(fh) = v.get_mut("fileHandling").and_then(Value::as_object_mut)
+            && !fh.contains_key("autosaveIntervalSecs")
+            && let Some(minutes) = fh.remove("autosaveMinutes").and_then(|m| m.as_u64())
+        {
+            fh.insert("autosaveIntervalSecs".into(), json!(minutes.saturating_mul(60)));
+        }
         if let Some(interface) = v.get_mut("interface").and_then(Value::as_object_mut)
             && !interface.contains_key("appearanceMode")
             && let Some(theme) = interface.get("theme").and_then(Value::as_str).and_then(Theme::parse)
@@ -1843,6 +1865,11 @@ impl Session {
     /// Batches defer colour validation until their complete candidate is staged. Returns
     /// whether colour settings were touched, including whole-section/root-object updates.
     fn set_pref(&mut self, path: &str, value: Value, validate_color: bool) -> std::result::Result<bool, String> {
+        // Legacy autosaveMinutes path redirect.
+        if path == "fileHandling.autosaveMinutes" {
+            let secs = value.as_f64().map(|m| (m * 60.0).round() as u64).unwrap_or(600);
+            return self.set_pref("fileHandling.autosaveIntervalSecs", json!(secs), validate_color);
+        }
         if let Some(rest) = path.strip_prefix("colorSettings") {
             let mut cur = serde_json::to_value(&self.color.settings).map_err(|e| e.to_string())?;
             let rest = rest.trim_start_matches('.');

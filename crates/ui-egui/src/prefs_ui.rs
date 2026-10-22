@@ -672,10 +672,10 @@ fn link_updates(app: &mut PhotocraftApp, ctx: &egui::Context) {
     ctx.request_repaint_after(std::time::Duration::from_millis(wait));
 }
 
-/// Background autosave of documents with unsaved changes every N minutes (File Handling).
+/// Background autosave of documents with unsaved changes every N seconds (File Handling).
 fn autosave(app: &mut PhotocraftApp) {
     let fh = &app.session.prefs().file_handling;
-    let (on, minutes) = (fh.autosave, fh.autosave_minutes.max(1));
+    let (on, interval_secs) = (fh.autosave, fh.autosave_interval_secs.max(5));
     if app.services.autosave.is_none() {
         return;
     }
@@ -715,7 +715,7 @@ fn autosave(app: &mut PhotocraftApp) {
     if !on {
         return;
     }
-    let interval = minutes as f64 * 60_000.0;
+    let interval = interval_secs as f64 * 1000.0;
     if app.prefs_rt.next_autosave_ms == 0.0 || app.prefs_rt.next_autosave_ms > now + interval {
         app.prefs_rt.next_autosave_ms = now + interval;
         return;
@@ -1225,6 +1225,12 @@ fn humanize(key: &str) -> String {
     }
     if key == "nudgeBundlePauseMs" {
         return "Nudge Bundle Pause (ms)".into();
+    }
+    if key == "autosaveIntervalSecs" {
+        return "Autosave Interval (seconds)".into();
+    }
+    if key == "autosaveUnit" {
+        return "Autosave Unit".into();
     }
     // Performance: presentation without vsync (#1343); like the other graphics settings, it
     // takes effect when the window next opens.
@@ -3189,8 +3195,10 @@ mod tests {
                 }
                 let Some(obj) = v.get(sec).and_then(Value::as_object) else { continue };
                 for k in obj.keys() {
-                    if sec == "interface" && k == "favoriteThemes" {
-                        continue; // Rendered as star controls beside the theme choices.
+                    if (sec == "interface" && k == "favoriteThemes")
+                        || (sec == "fileHandling" && (k == "autosaveIntervalSecs" || k == "autosaveUnit"))
+                    {
+                        continue;
                     }
                     let mut labels = vec![humanize(k)];
                     labels.extend(prefs::choices(&format!("{sec}.{k}")).into_iter().flatten().map(|c| choice_label(c)));
@@ -3237,7 +3245,7 @@ mod tests {
     fn a_wrongly_typed_value_resets_only_itself_and_is_repaired_on_disk() {
         // #6611: one bad value used to reset every preference, on every launch.
         let saved = json!({
-            "fileHandling": {"recentFileCount": "ten", "autosaveMinutes": 5},
+            "fileHandling": {"recentFileCount": "ten", "autosaveIntervalSecs": 300},
             "performance": {"historyStates": 12},
             "shortcuts": {"edit.fill": "Cmd+Shift+F", "file.open": 7},
             "futureSection": {"kept": true},
@@ -3246,7 +3254,7 @@ mod tests {
         let ctx = egui::Context::default();
         tick(&mut app, &ctx);
         let p = app.session.prefs();
-        assert_eq!((p.file_handling.recent_file_count, p.file_handling.autosave_minutes, p.performance.history_states), (20, 5, 12));
+        assert_eq!((p.file_handling.recent_file_count, p.file_handling.autosave_interval_secs, p.performance.history_states), (20, 300, 12));
         assert!(!app.ui.status.contains("reset"), "{}", app.ui.status);
         let notice = app.ui.notices.iter().find(|n| n.title == "Some preferences were reset").expect("a notice names the bad values");
         let text = notice.text(&notice.lines[0]);
@@ -3254,7 +3262,7 @@ mod tests {
         // The file now holds the default in its place and keeps everything else.
         let v = stored(&store);
         assert_eq!(v["fileHandling"]["recentFileCount"], 20);
-        assert_eq!(v["fileHandling"]["autosaveMinutes"], 5);
+        assert_eq!(v["fileHandling"]["autosaveIntervalSecs"], 300);
         assert_eq!(v["performance"]["historyStates"], 12);
         assert_eq!(v["shortcuts"]["edit.fill"], "Cmd+Shift+F");
         assert!(v["shortcuts"].get("file.open").is_none());
@@ -3263,7 +3271,7 @@ mod tests {
         let (mut next, _) = app_with_saved(store.lock().unwrap().clone());
         tick(&mut next, &ctx);
         assert!(next.ui.notices.iter().all(|n| n.title != "Some preferences were reset"));
-        assert_eq!(next.session.prefs().file_handling.autosave_minutes, 5);
+        assert_eq!(next.session.prefs().file_handling.autosave_interval_secs, 300);
     }
 
     #[test]
