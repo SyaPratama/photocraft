@@ -141,6 +141,30 @@ fn secondary_taps_keep_canvas_layer_menus_open() {
     check_reopening(Tool::RectMarquee, Modifiers::COMMAND, Popup::Layers);
 }
 
+/// A macOS Control-click (control_click.rs) reaches the canvas as a right-click that still holds
+/// Control: it opens the same menu as a plain right-click and paints nothing.
+#[test]
+fn control_clicks_open_the_right_click_menus() {
+    for (tool, popup) in [(Tool::RectMarquee, Popup::Tool), (Tool::Pen, Popup::Tool), (Tool::Move, Popup::Layers), (Tool::Brush, Popup::Brush)] {
+        let mut h = harness(tool, true, 1.0);
+        let at = fractional_point(&h, 1.0);
+        let before = document_state(&h);
+        let mut clicks = crate::control_click::ControlClick::default();
+        h.event(Event::ModifiersChanged(Modifiers::CTRL));
+        h.event(Event::PointerMoved(at));
+        h.run_steps(2);
+        for pressed in [true, false] {
+            let mut events = vec![Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: Modifiers::CTRL }];
+            clicks.normalize(&mut events, true);
+            h.input_mut().events.extend(events);
+            h.run_steps(1);
+        }
+        h.run_steps(3);
+        assert!(is_open(&h, popup), "{tool:?}");
+        assert!(document_state(&h) == before, "{tool:?}: a Control-click paints nothing");
+    }
+}
+
 #[test]
 fn reopened_canvas_menus_still_choose_their_actions() {
     let mut h = harness(Tool::RectMarquee, true, 1.0);

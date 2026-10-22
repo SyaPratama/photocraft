@@ -66,6 +66,11 @@ pub(crate) fn authorize_render_command(id: &str, params: &Value) -> Result<()> {
     }
 }
 
+/// Whether the work on this thread is done for an untrusted session (a gate is installed).
+pub(crate) fn authorization_installed() -> bool {
+    RENDER_AUTHORIZATION.with(std::cell::Cell::get).is_some()
+}
+
 /// Identifies one background job for the session's lifetime.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, serde::Deserialize)]
 pub struct JobId(pub u64);
@@ -216,6 +221,7 @@ struct Running {
     /// `dispatch`, once recording resumes). Only that recording gets the job's step: one started
     /// later must not pick up an edit made before it.
     recorded_by: Option<u64>,
+    pre_selected: Option<Vec<LayerId>>,
     doc: Option<DocId>,
     /// The document as the job saw it: applying fails if it was edited meanwhile.
     snapshot: Option<Weak<Document>>,
@@ -405,6 +411,7 @@ pub fn run<T: Send + 'static>(
         params: Value::Null,
         journal: true,
         recorded_by: None,
+        pre_selected: None,
         doc,
         snapshot,
         ctx,
@@ -489,6 +496,14 @@ pub enum OpenSource {
 /// The command id open jobs report (there is no engine command: opening is the shell's).
 pub const OPEN_JOB: &str = "file.open";
 
+/// The import settings files are opened and placed with.
+pub fn import_options(prefs: &crate::prefs::Preferences) -> photocraft_io::ImportOptions {
+    photocraft_io::ImportOptions {
+        max_group_depth: prefs.file_handling.rasterize_svg_groups_deeper_than as usize,
+        demosaic: prefs.raw_defaults.demosaic.method(),
+    }
+}
+
 impl Session {
     /// Run the heavy part of inline (not background) job commands under `ctx`, so another thread
     /// can cancel them: a live preview whose parameters changed stops its stale computation
@@ -507,7 +522,9 @@ impl Session {
     /// Open a file in the background: read (for a path) and decode on a worker, with progress
     /// (per layer for PSD/PSB) and cancellation, then add the document like
     /// [`Session::open_document`] (Color Settings policies apply). `name` names the document.
-    /// The job's result is `{document, name, warnings, color}`; on wasm it runs inline. When
+    /// The job's result is `{document, docId, name, warnings, color}`; on wasm it runs inline.
+    /// `document` is the tab index at apply time; resolve `docId` before handling a delayed
+    /// completion, since earlier handlers may have moved or closed tabs. When
     /// Color Settings ask about the file's profile, the document is held back instead and the
     /// result is `{held, name, warnings, color}` (`color` the question): take it with
     /// [`Session::take_held_open`] once answered.
@@ -515,7 +532,7 @@ impl Session {
         let label = format!("Opening {name}");
         let name_w = name.to_string();
         let name_a = name.to_string();
-        let max_svg_group_depth = self.prefs().file_handling.rasterize_svg_groups_deeper_than as usize;
+        let opts = import_options(self.prefs());
         self.start_job(
             OPEN_JOB,
             json!({"name": name}),
@@ -529,12 +546,12 @@ impl Session {
                 };
                 ctx.check()?;
                 ctx.progress(0.02, "Decoding");
-                let imported = ctx
-                    .stage(0.02, 0.95, "Decoding", |ctl| photocraft_io::import_with_svg_group_depth_and_interrupt(&name_w, &bytes, max_svg_group_depth, ctl))
-                    .map_err(|e| match e {
+                let imported = ctx.stage(0.02, 0.95, "Decoding", |ctl| photocraft_io::import_with_options_and_interrupt(&name_w, &bytes, &opts, ctl)).map_err(
+                    |e| match e {
                         photocraft_io::IoError::Cancelled => EngineError::Cancelled,
                         e => EngineError::Other(e.to_string()),
-                    })?;
+                    },
+                )?;
                 ctx.progress(0.95, "Preparing layers");
                 warm_layer_bounds(&imported.document, || ctx.check())?;
                 // Type layers need the shared text engine, whose first use waits for the
@@ -551,6 +568,7 @@ impl Session {
             move |s, mut r: photocraft_io::ImportResult| {
                 // File Handling's ACEScg option, before the colour prompt looks at the profile.
                 crate::file_cmds::tag_exr_colorspace(s, &name_a, &mut r.document);
+                crate::file_cmds::raw_defaults(s, &r.warnings, &mut r.document);
                 // Ask When Opening: held back until the prompt is answered (`take_held_open`). A
                 // developed raw has no embedded profile to ask about.
                 let raw = r.warnings.iter().any(|w| w.contains(photocraft_io::raw::DEVELOPED_NOTE));
@@ -559,10 +577,12 @@ impl Session {
                     return Ok(json!({"held": held, "name": name_a, "warnings": r.warnings, "color": question}));
                 }
                 let (index, color) = s.open_document(r.document, None);
+                // Persisted IDs can collide: report the identity the session actually admitted.
+                let id = s.documents().get(index).ok_or(EngineError::NoDocument)?.doc.id;
                 if let Some(st) = s.active_mut() {
                     st.source_read_only = r.source_read_only;
                 }
-                Ok(json!({"document": index, "name": name_a, "warnings": r.warnings, "color": color}))
+                Ok(json!({"document": index, "docId": id.0, "name": name_a, "warnings": r.warnings, "color": color}))
             },
         )
     }
@@ -787,6 +807,7 @@ impl Session {
         self.jobs.spawn = background;
         // Commands this one runs on its own behalf journal after this mark (#3067).
         let nested_from = self.journal.len();
+        let pre_selected = if self.actions.recording.is_some() { self.active().map(|st| st.selected_layers()) } else { None };
         // A replayable command is recorded as one step, so recording pauses while it runs: an
         // action it plays (a script step) must not flush the steps it ran so far into the action
         // being recorded, nor move the recording mark past the entries it is about to replace.
@@ -815,6 +836,7 @@ impl Session {
                 job.params = params;
                 job.journal = spec.journal;
                 job.recorded_by = self.actions.recording.map(|_| self.actions.take);
+                job.pre_selected = pre_selected.clone();
                 let jid = job.id;
                 self.jobs.running.push(job);
                 Ok(Started::Job(jid))
@@ -834,7 +856,7 @@ impl Session {
                         st.fx_collapsed.push(layer_id);
                     }
                 }
-                self.after_command(id, params, spec.journal, Some(nested_from));
+                self.after_command(id, params, spec.journal, Some(nested_from), pre_selected.as_deref());
                 Ok(Started::Done(v))
             }
         }
@@ -872,12 +894,12 @@ impl Session {
     /// dropped, so a recorded action replays the command once, not its steps as well (#3067).
     /// Edit › Transform › Again (and Again on a Copy) is not replayable and keeps the concrete
     /// steps it ran instead.
-    fn after_command(&mut self, id: &str, params: Value, journal: bool, nested_from: Option<usize>) {
+    fn after_command(&mut self, id: &str, params: Value, journal: bool, nested_from: Option<usize>, pre_selected: Option<&[LayerId]>) {
         // A layer-mask view ends when another layer becomes active (#196).
         if let Some(st) = self.active_mut() {
             crate::mask_view_cmds::fix(st);
         }
-        crate::edit_menu_cmds::after_command(self, id);
+        crate::edit_menu_cmds::after_command(self, id, &params);
         crate::automate_cmds::after_command(self, id);
         self.sync_preset_store();
         if !journal {
@@ -889,9 +911,9 @@ impl Session {
         if !crate::brush_cmds::coalesce_journal(self, id, &params) {
             let params = match id {
                 _ if self.actions.recording.is_none() => params,
-                "layer.select" => crate::layer_multi_cmds::recorded_selection(self, params),
+                "layer.duplicate" => crate::artboard_cmds::recorded_duplicate(self, crate::layer_multi_cmds::recorded_step(self, id, params, pre_selected)),
                 "layerComp.apply" => crate::comps_cmds::recorded_apply(self, params),
-                _ => params,
+                _ => crate::layer_multi_cmds::recorded_step(self, id, params, pre_selected),
             };
             self.journal.push((id.to_string(), params));
         }
@@ -914,7 +936,7 @@ impl Session {
     }
 
     fn apply_job(&mut self, job: &Running, apply: Option<Apply>, payload: Payload) -> Result<Value> {
-        let Running { label, doc, snapshot, coalesce, color_restrict, layers, command, params, journal, recorded_by, .. } = job;
+        let Running { label, doc, snapshot, coalesce, color_restrict, layers, command, params, journal, recorded_by, pre_selected, .. } = job;
         // A recording started after the job (#7289) keeps what it has so far, and the job's step
         // goes into the journal past its start, so that recording doesn't get it.
         let foreign = self.actions.recording.is_some() && *recorded_by != Some(self.actions.take);
@@ -968,7 +990,7 @@ impl Session {
         // Restoring the viewed document first would attribute Fade and slice updates
         // to that document instead, when the user switched tabs mid-job.
         if r.is_ok() {
-            self.after_command(command, params.clone(), *journal, Some(nested_from));
+            self.after_command(command, params.clone(), *journal, Some(nested_from), pre_selected.as_deref());
             if foreign && let Some((start, _)) = self.actions.recording.as_mut() {
                 *start = self.journal.len();
             }

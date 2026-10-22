@@ -1144,7 +1144,7 @@ fn build() -> Vec<CommandSpec> {
             "Move Layer",
             [],
             None,
-            r##"{"layer":id?,"dx":i32,"dy":i32,"units":"px"|"pt"="px" (pt: points, whole pixels at the document's resolution),"target":"pixels"|"mask"="pixels"} (no layer: every selected layer; linked layers follow; target mask: a layer whose mask is unlinked moves that mask alone, a linked mask moves with the layer)"##,
+            r##"{"layer":id?,"dx":i32,"dy":i32,"units":"px"|"pt"="px" (pt: points, whole pixels at the document's resolution),"target":"pixels"|"mask"="pixels","selection":bool=false} (no layer: every selected layer; linked layers follow; target mask: a layer whose mask is unlinked moves that mask alone, a linked mask moves with the layer; selection: the selection moves too, in the same step)"##,
             has_layer,
             crate::layer_multi_cmds::translate
         ),
@@ -1272,12 +1272,33 @@ fn build() -> Vec<CommandSpec> {
             label: "Activate Document",
             menu: &[],
             shortcut: None,
-            params: r##"{"document":index}"##,
+            params: r##"{"document":index} or {"offset":int} (the open document that many tabs after the active one, before it when negative: a Photoshop action's switch to another document) → {document}"##,
             enabled: has_doc,
             run: |s, p| {
-                let i = p.get("document").and_then(Value::as_u64).ok_or_else(|| bad("document.activate", "missing `document`"))?;
-                let idx = usize::try_from(i).map_err(|_| bad("document.activate", "`document` out of range"))?;
-                if s.set_active(idx) { Ok(Value::Null) } else { Err(EngineError::Other(format!("no document at index {idx}"))) }
+                // A null key counts as omitted.
+                let given = |k: &str| p.get(k).filter(|v| !v.is_null());
+                let idx = match (given("document"), given("offset")) {
+                    (Some(_), Some(_)) => return Err(bad("document.activate", "give `document` or `offset`, not both")),
+                    (None, None) => return Err(bad("document.activate", "needs `document` (a tab index) or `offset`")),
+                    // Past the first or last tab is refused rather than wrapped, so an action that
+                    // copies from one document never silently pastes into the wrong one (#7103).
+                    (None, Some(o)) => {
+                        let o = o.as_i64().ok_or_else(|| bad("document.activate", "`offset` must be an integer"))?;
+                        let (active, len) = (s.active_index().ok_or(EngineError::NoDocument)?, s.documents().len());
+                        let target = i64::try_from(active).ok().and_then(|a| a.checked_add(o)).and_then(|i| usize::try_from(i).ok());
+                        let Some(i) = target.filter(|&i| i < len) else {
+                            let side = if o < 0 { "before" } else { "after" };
+                            let msg = format!("no document {} {side} the active one, which is {} of {len}", o.unsigned_abs(), active + 1);
+                            return Err(EngineError::Other(msg));
+                        };
+                        i
+                    }
+                    (Some(d), None) => {
+                        let i = d.as_u64().ok_or_else(|| bad("document.activate", "`document` must be a tab index"))?;
+                        usize::try_from(i).map_err(|_| bad("document.activate", "`document` out of range"))?
+                    }
+                };
+                if s.set_active(idx) { Ok(json!({"document": idx})) } else { Err(EngineError::Other(format!("no document at index {idx}"))) }
             },
             journal: false,
         },
@@ -1463,6 +1484,7 @@ fn build() -> Vec<CommandSpec> {
         });
     }
     v.extend(crate::layer_style::specs());
+    v.extend(crate::contour_lib_cmds::specs());
     v.extend(crate::layer_list_cmds::specs());
     v.extend(crate::filters::specs());
     v.extend(crate::filters_ext::specs());
@@ -1524,6 +1546,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::adjust_cmds::specs());
     v.extend(crate::layer_menu_cmds::specs());
     v.extend(crate::layer_label_cmds::specs());
+    v.extend(crate::layer_xmp_cmds::specs());
     v.extend(crate::mode_cmds::specs());
     v.extend(crate::multichannel_cmds::specs());
     v.extend(crate::pattern_cmds::specs());
@@ -1612,6 +1635,7 @@ pub fn adjustment_kind(a: &Adjustment) -> &'static str {
         Adjustment::GradientMap { .. } => "gradientMap",
         Adjustment::SelectiveColor { .. } => "selectiveColor",
         Adjustment::ColorLookup { .. } => "colorLookup",
+        Adjustment::Unsupported { .. } => "unsupported",
         _ => "invert",
     }
 }

@@ -887,6 +887,7 @@ pub fn specs() -> Vec<CommandSpec> {
                         gray
                     };
                     for id in ids {
+                        background_to_layer(doc, id);
                         let l = doc.layer_mut(id).ok_or(EngineError::NoLayer(id))?;
                         l.effects = fx.clone();
                         // Pass Through is a group's mode: a group's style pastes onto other layers as

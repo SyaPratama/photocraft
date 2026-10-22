@@ -524,6 +524,13 @@ fn main() -> eframe::Result {
     #[cfg(not(target_os = "macos"))]
     let single_instance = {
         let new_instance_env = std::env::var("PHOTOCRAFT_NEW_INSTANCE").ok();
+        // A variable documented as the equivalent of a per-launch flag counts as that flag: a
+        // launch that sets only `PHOTOCRAFT_PRESENT_MODE` (say) has per-process options too, so it
+        // keeps its own process instead of handing its files over and being ignored.
+        // Folded in here, inside the block that only non-macOS builds compile, so the binding
+        // above keeps its `mut` off macOS, where nothing is folded in.
+        let mut launch_options = launch_options;
+        launch_options.extend_from_slice(&single_instance::env_launch_options());
         let context = single_instance::LaunchContext {
             per_user_settings: app_dirs::current().mode == app_dirs::Mode::Platform,
             new_instance_flag: new_instance,
@@ -784,6 +791,9 @@ fn main() -> eframe::Result {
             if let Some(rs) = cc.wgpu_render_state.clone() {
                 app.perf.gpu_info.set_adapter(&rs.adapter.get_info());
                 app.perf.gpu_info.set_available(&rs.available_adapters);
+                // Every egui texture uploads through this adapter, whichever canvas draws:
+                // Iris Xe on DX12 shows stale memory in all-zero texels (texel_guard.rs).
+                photocraft_ui_egui::texel_guard::install(&cc.egui_ctx, &rs.adapter.get_info());
                 let software_window = rs.adapter.get_info().device_type == eframe::wgpu::DeviceType::Cpu;
                 if software_window && mode != photocraft_engine::prefs::RenderingMode::Cpu {
                     // Keep an earlier note, such as a requested adapter that couldn't be used.

@@ -63,7 +63,8 @@ pub fn hex(c: [f32; 3]) -> String {
 
 pub fn parse_hex(s: &str) -> Option<[f32; 3]> {
     let h = s.trim().trim_start_matches('#');
-    if h.len() != 6 {
+    // `from_str_radix` accepts a leading '+', so require plain hex digits first.
+    if h.len() != 6 || !h.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
     // `get`, not `[..]`: typed text may be multi-byte, and a byte range can split a character.
@@ -480,7 +481,10 @@ fn color_field(ui: &mut egui::Ui, f: &mut Map<String, Value>) {
     ui.painter().rect_stroke(field, 0.0, Stroke::new(1.0, t.field_border), StrokeKind::Outside);
     let marker = pos2(field.left() + fx * field.width(), field.top() + fy * field.height());
     ui.painter().circle_stroke(marker, 5.0, Stroke::new(1.5, if hsv[2] > 0.6 && hsv[1] < 0.4 { Color32::BLACK } else { Color32::WHITE }));
-    if let Some(p) = resp.interact_pointer_pos().filter(|_| resp.dragged() || resp.clicked()) {
+    // Photoshop updates the colour on the press itself, not only when the button is released
+    // (#6937): `is_pointer_button_down_on` is true from the press frame onwards (it covers
+    // dragging too), while `clicked` fires on release and `dragged` only after a move.
+    if let Some(p) = resp.interact_pointer_pos().filter(|_| resp.is_pointer_button_down_on() || resp.clicked()) {
         let (x, y) = (((p.x - field.left()) / field.width()).clamp(0.0, 1.0), ((p.y - field.top()) / field.height()).clamp(0.0, 1.0));
         let c = field_color(&mode, fz, x, y);
         let keep = match mode.as_str() {
@@ -499,7 +503,7 @@ fn color_field(ui: &mut egui::Ui, f: &mut Map<String, Value>) {
         let tri = vec![pos2(x, sy), pos2(x - 6.0 * dir, sy - 4.0), pos2(x - 6.0 * dir, sy + 4.0)];
         ui.painter().add(egui::Shape::convex_polygon(tri, t.text, Stroke::NONE));
     }
-    if let Some(p) = sresp.interact_pointer_pos().filter(|_| sresp.dragged() || sresp.clicked()) {
+    if let Some(p) = sresp.interact_pointer_pos().filter(|_| sresp.is_pointer_button_down_on() || sresp.clicked()) {
         let z = 1.0 - ((p.y - strip.top()) / strip.height()).clamp(0.0, 1.0);
         let h = match mode.as_str() {
             "h" => Some([z * 360.0, hsv[1], hsv[2]]),
@@ -800,6 +804,7 @@ pub fn confirm(app: &mut PhotocraftApp, f: &Map<String, Value>) -> Result<Value,
     let r = app.run("tools.setColors", params)?;
     if target == "foreground" {
         crate::type_tool::foreground_changed(app);
+        crate::shape_fill_ui::foreground_changed(app, None);
     }
     Ok(r)
 }
@@ -864,6 +869,32 @@ mod tests {
         let h = picker("#12abef");
         assert_eq!(h.get_by_role(Role::TextInput).value().as_deref(), Some("12ABEF"));
         assert_eq!(color(&h), "#12abef", "casing is presentation only");
+    }
+
+    /// #6937: pressing the hue strip must update the colour on the press frame, not only when
+    /// the button is released (Photoshop updates immediately on click-and-hold).
+    #[test]
+    fn hue_strip_updates_the_color_on_press_not_on_release() {
+        let mut h = picker("#0000ff"); // pure blue: hue 240°
+        let web = h.get_by_label("Only Web Colors").rect();
+        let pick = h.get_by_label("Pick screen color").rect();
+        // The strip is 18 pt wide, 6 pt right of the 200 pt field whose left edge is the column's
+        // (the screen-colour button shares it); its bottom edge is just above the checkbox.
+        // Press near the bottom: hue ~5°, a red the blue starting colour cannot produce via the field.
+        let press = pos2(pick.left() + FIELD + 15.0, web.top() - 20.0);
+        h.event(egui::Event::PointerMoved(press));
+        h.run_steps(1);
+        h.event(egui::Event::PointerButton { pos: press, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+        h.run_steps(1);
+        let held = color(&h);
+        assert_ne!(held, "#0000ff", "holding the button on the strip must already change the colour");
+        // The colour is the red-ish hue near the strip's bottom, not the old blue: had the press
+        // landed on the field instead of the strip, the hue (and the blue channel) would survive.
+        let [r, _, b] = parse_hex(&held).unwrap();
+        assert!(r > 0.5 && b < 0.2, "expected a red-ish hue from the strip, got {held}");
+        h.event(egui::Event::PointerButton { pos: press, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+        h.run_steps(1);
+        assert_eq!(color(&h), held, "releasing must not move the colour again");
     }
 
     #[test]
@@ -1170,6 +1201,13 @@ mod tests {
     }
 
     /// HSB and hex round-trip sRGB colours.
+    #[test]
+    fn parse_hex_rejects_signs() {
+        assert_eq!(parse_hex("#+f+f+f"), None);
+        assert_eq!(parse_hex("+1+2+3"), None);
+        assert!(parse_hex("#0f0f0f").is_some());
+    }
+
     #[test]
     fn hsv_round_trips() {
         for c in [[1.0, 0.0, 0.0], [0.2, 0.6, 0.4], [0.5, 0.5, 0.5], [0.0, 0.0, 1.0], [0.9, 0.8, 0.1]] {

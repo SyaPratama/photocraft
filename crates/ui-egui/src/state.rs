@@ -556,11 +556,53 @@ pub struct View {
     /// Canvas camera rotation in degrees, wrapped to (−180, 180]. Turns the view, not the pixels.
     #[serde(default)]
     pub rotation: f32,
+    /// Transient presentation state for a discrete zoom command; the target camera above remains
+    /// authoritative and this flag is never persisted.
+    #[serde(skip)]
+    pub(crate) zoom_animating: bool,
+    /// Optional document/screen anchor for a pointer-centred Zoom-tool transition.
+    #[serde(skip)]
+    pub(crate) zoom_anchor: Option<([f64; 2], [f32; 2])>,
+    #[serde(skip)]
+    pub(crate) display_camera: Option<(f32, [f32; 2])>,
+    #[serde(skip)]
+    pub(crate) zoom_transition: Option<ZoomTransition>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ZoomTransition {
+    pub from: (f32, [f32; 2]),
+    pub target: (f32, [f32; 2]),
+    pub started: f64,
+}
+
+impl View {
+    /// Start a discrete zoom only when Animated Zoom is enabled; otherwise discard the
+    /// presentation camera so the requested camera takes effect immediately.
+    pub(crate) fn request_zoom_animation(&mut self, enabled: bool) {
+        self.zoom_animating = enabled;
+        self.zoom_anchor = None;
+        if !enabled {
+            self.zoom_transition = None;
+            self.display_camera = Some((self.zoom, self.center));
+        }
+    }
 }
 
 impl Default for View {
     fn default() -> Self {
-        Self { zoom: 1.0, center: [0.0, 0.0], fit_pending: true, fill_pending: false, doc_size: [0, 0], rotation: 0.0 }
+        Self {
+            zoom: 1.0,
+            center: [0.0, 0.0],
+            fit_pending: true,
+            fill_pending: false,
+            doc_size: [0, 0],
+            rotation: 0.0,
+            zoom_animating: false,
+            zoom_anchor: None,
+            display_camera: None,
+            zoom_transition: None,
+        }
     }
 }
 
@@ -614,6 +656,14 @@ pub struct ToolOptions {
     pub type_size: f32,
     pub type_aa: String,
     pub type_align: String,
+    /// Character/Paragraph panel defaults beyond the options bar, in `type.setStyle`'s
+    /// parameter format. Kept as overrides so saved engine defaults still supply unset fields.
+    /// OpenType features and variable-font axes are merged per tag/axis.
+    #[serde(default)]
+    pub type_style_defaults: serde_json::Map<String, serde_json::Value>,
+    /// Type tool: paragraph direction of new type, "auto" (from the first strong character),
+    /// "ltr" or "rtl" (TYPE-218-2).
+    pub type_direction: String,
     /// Clone Stamp / Healing Brush.
     pub clone_aligned: bool,
     /// Pattern Stamp: lock the tile origin in document space across strokes.
@@ -914,6 +964,8 @@ impl Default for ToolOptions {
             type_size: 48.0,
             type_aa: "sharp".into(),
             type_align: "left".into(),
+            type_style_defaults: serde_json::Map::new(),
+            type_direction: "auto".into(),
             clone_aligned: true,
             pattern_stamp_aligned: true,
             pattern_stamp_impressionist: false,
@@ -1098,6 +1150,17 @@ pub enum MadeLayer {
     Place,
 }
 
+/// A paragraph-box handle drag: the handle, and the box (text-space) and layer transform as
+/// they were at the press. Every move recomputes from this snapshot, so ⌥ pressed or released
+/// mid-drag mirrors about the centre the box started with — as if it had been held from the
+/// start.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BoxResize {
+    pub handle: u8,
+    pub shape: [f32; 4],
+    pub aff: photocraft_geom::Affine,
+}
+
 /// In-progress inline type editing (Type tool). Offsets are character indices.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TextEdit {
@@ -1119,7 +1182,7 @@ pub struct TextEdit {
     pub dragging: bool,
     /// Paragraph-box handle being dragged (0-3 corners from top-left clockwise, 4-7 top/right/bottom/left edges).
     #[serde(skip)]
-    pub resize: Option<u8>,
+    pub resize: Option<BoxResize>,
     /// IME composition in progress: (start, length) in characters. The preedit text lives in the
     /// layer so it lays out like typed text; each IME update replaces it.
     #[serde(skip)]
@@ -1220,6 +1283,10 @@ pub struct UiState {
     /// Recently opened file paths, most-recent first (File › Open Recent). Capped; de-duplicated.
     #[serde(default)]
     pub recent_files: Vec<String>,
+    /// Recently picked type families, most-recent first (the font menu's Recent group). Capped by
+    /// Preferences ▸ Type ▸ Recent Fonts; de-duplicated.
+    #[serde(default)]
+    pub recent_fonts: Vec<String>,
     /// Inline type editing session, if any.
     #[serde(default)]
     pub text_edit: Option<TextEdit>,
@@ -1303,6 +1370,9 @@ pub struct UiState {
     /// Pen path under construction.
     #[serde(default)]
     pub pen: Option<crate::vector_ui::PenPath>,
+    /// The document the pen path is drawn on; switching away commits it to that Work Path.
+    #[serde(default)]
+    pub pen_doc: Option<photocraft_doc::DocId>,
     #[serde(default)]
     pub stroke_editor: Option<crate::shape_stroke_ui::StrokeEditor>,
     /// Direct Selection tool: selected anchors and the drag in progress (#790).
@@ -1465,6 +1535,7 @@ impl Default for UiState {
             group_tools: Vec::new(),
             spring: None,
             recent_files: Vec::new(),
+            recent_fonts: Vec::new(),
             text_edit: None,
             caret_blink_time: 0.0,
             text_edit_return_tool: None,
@@ -1508,6 +1579,7 @@ impl Default for UiState {
             layer_filter_name: String::new(),
             layer_filter_mode: default_layer_filter_mode(),
             pen: None,
+            pen_doc: None,
             stroke_editor: None,
             direct_selection: Default::default(),
             corner_radius: None,

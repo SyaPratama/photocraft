@@ -27,7 +27,7 @@ use std::sync::{Arc, Mutex};
 
 use photocraft_algo::resample::translate_surface;
 use photocraft_algo::transform::Homography;
-use photocraft_color::{BlendMode, PixelFormat};
+use photocraft_color::{BlendMode, ColorMode, PixelFormat, SampleType};
 use photocraft_doc::{DocId, Document, Layer, LayerContent, LayerId, LayerMask, Metadata, SmartContentsId, SmartFilter, SmartObject, SmartSource};
 use photocraft_geom::{Affine, Rect, Size};
 use photocraft_raster::Surface;
@@ -79,10 +79,16 @@ fn base_name(path: &str) -> String {
 
 /// A linked file's bytes; `None` when it is missing or its path is not followed
 /// ([`crate::doc_path::resolve`]).
+///
+/// The path is document data, not a request parameter, so every read rechecks it with the gate
+/// of the session the work is done for: a filter, transform or refresh re-renders from here,
+/// not only the contents commands that judge it up front. A refused path is handled like a
+/// missing file: the layer keeps its last rendering.
 fn read_file(path: &str) -> Option<Vec<u8>> {
     if path.is_empty() {
         return None;
     }
+    crate::jobs::authorize_render_command("layer.smartObjects.updateModifiedContent", &json!({"path": path})).ok()?;
     photocraft_format::read_file(&crate::doc_path::resolve(path).ok()?).ok()
 }
 
@@ -194,6 +200,30 @@ fn buffer_to_surface(buf: &photocraft_compose::Buffer, fmt: PixelFormat) -> Surf
     s
 }
 
+fn source_surface(src: &Document, buf: &photocraft_compose::Buffer, fmt: PixelFormat) -> Result<Surface> {
+    let gray = fmt.mode == ColorMode::Grayscale && src.pixel_format().mode != ColorMode::Grayscale;
+    let linear = fmt.sample == SampleType::F32 && src.depth != SampleType::F32;
+    if !gray && !linear {
+        return Ok(buffer_to_surface(buf, fmt));
+    }
+    let mut doc = Document::new(src.name.clone(), src.size, src.mode, src.depth);
+    doc.icc_profile = src.icc_profile.clone();
+    doc.layers = vec![Layer::new("source", LayerContent::Raster(buffer_to_surface(buf, src.pixel_format())))];
+    if gray {
+        let gray_profile = crate::color_cmds::working_profile(ColorMode::Grayscale);
+        crate::color_cmds::convert_document(&mut doc, &gray_profile, photocraft_cms::Intent::RelativeColorimetric, true)?;
+    }
+    if linear {
+        crate::image_cmds::change_depth(&mut doc, SampleType::F32);
+    }
+    let surface = doc.layers.pop().and_then(|l| match l.content {
+        LayerContent::Raster(s) => Some(s),
+        _ => None,
+    });
+    let surface = surface.ok_or_else(|| other("the smart object's source could not be converted"))?;
+    Ok(if surface.format() == fmt { surface } else { surface.convert(fmt) })
+}
+
 /// An SVG source rendered at `scale` times its own size (cached per scale), so a vector smart
 /// object stays sharp however it is placed.
 pub fn svg_source_image(bytes: &[u8], fmt: PixelFormat, scale: f64) -> Result<SourceImage> {
@@ -229,7 +259,7 @@ pub fn source_image(file_name: &str, bytes: &[u8], fmt: PixelFormat) -> Result<S
     }
     let doc = decode_source(file_name, bytes)?;
     let buf = photocraft_compose::flatten(&doc);
-    let img = SourceImage { surface: Arc::new(buffer_to_surface(&buf, fmt)), bounds: doc.bounds() };
+    let img = SourceImage { surface: Arc::new(source_surface(&doc, &buf, fmt)?), bounds: doc.bounds() };
     cache_put(key, img.clone());
     Ok(img)
 }
@@ -276,7 +306,7 @@ pub fn stack_image(file_name: &str, bytes: &[u8], fmt: PixelFormat, mode: photoc
         photocraft_doc::StackMode::Variance => Stat::Variance,
     };
     let buf = photocraft_compose::Buffer { rect: bounds, px: photocraft_algo::stack::combine(&frames, stat) };
-    let img = SourceImage { surface: Arc::new(buffer_to_surface(&buf, fmt)), bounds };
+    let img = SourceImage { surface: Arc::new(source_surface(&doc, &buf, fmt)?), bounds };
     cache_put(key, img.clone());
     Ok(img)
 }
@@ -513,9 +543,20 @@ pub fn render_below_filter(doc: &Document, sm: &SmartObject, index: usize) -> Re
 }
 
 /// Re-renders smart layer `l` (which lives in `doc`) in place. Returns false if its source is
-/// unavailable (the cache is then left alone).
+/// unavailable or a visible filter can't be applied (the cache is then left alone).
 pub fn refresh_layer(doc: &Document, l: &mut Layer) -> Result<bool> {
+    if matches!(&l.content, LayerContent::Smart(sm) if !unapplied_filters(sm).is_empty()) {
+        return Ok(false);
+    }
     refresh_layer_in(doc, l, &JobCtx::new())
+}
+
+fn unapplied_filters(sm: &SmartObject) -> Vec<String> {
+    sm.smart_filters
+        .iter()
+        .filter(|f| sm.filters_enabled && f.visible && crate::commands::find(&f.command).is_none())
+        .map(|f| f.params.get("name").and_then(Value::as_str).unwrap_or(&f.command).to_string())
+        .collect()
 }
 
 fn refresh_layer_in(doc: &Document, l: &mut Layer, ctx: &JobCtx) -> Result<bool> {
@@ -816,14 +857,36 @@ fn convert(s: &mut Session, p: &Value) -> Result<Value> {
         // As with Group Layers, place the result in the top selected root's parent. Insert
         // before removal so paths shifting in other parents cannot discard unselected content.
         doc.insert_above(Some(top), so);
-        for id in ids {
-            doc.remove(id).ok_or(EngineError::NoLayer(id))?;
+        for id in &ids {
+            doc.remove(*id).ok_or(EngineError::NoLayer(*id))?;
+        }
+        if let [only] = ids[..] {
+            retarget_layer_refs(doc, only, new_id);
         }
         *active = Some(new_id);
         Ok(new_id)
     })?;
     crate::layer_multi_cmds::reselect(s, vec![new_id], Some(new_id));
     Ok(json!({"layer": new_id.0}))
+}
+
+fn retarget_layer_refs(doc: &mut Document, from: LayerId, to: LayerId) {
+    let Some((fill_opacity, effects)) = doc.layer(to).map(|l| (l.fill_opacity, l.effects.clone())) else { return };
+    for comp in doc.layer_comps.iter_mut().chain(doc.last_document_state.as_mut()) {
+        for state in comp.states.iter_mut().filter(|state| state.layer == from) {
+            state.layer = to;
+            if let Some(appearance) = &mut state.appearance {
+                appearance.fill_opacity = fill_opacity;
+                appearance.effects = effects.clone();
+            }
+        }
+    }
+    for def in doc.variables.defs.iter_mut().filter(|def| def.layer == from) {
+        def.layer = to;
+    }
+    for slice in doc.slices.list.iter_mut().filter(|slice| slice.layer == Some(from)) {
+        slice.layer = Some(to);
+    }
 }
 
 // ---------- contents ----------
@@ -869,24 +932,27 @@ fn set_source(s: &mut Session, p: &Value, label: &str, keep_psd: bool, make: imp
 
 // Keep the shared-instance transaction out of the per-command source-builder instantiations.
 fn set_shared_source(s: &mut Session, id: LayerId, label: &str, keep_psd: bool, new: SmartSource) -> Result<Value> {
-    let (parent, contents_id, changed) = s.edit(label, |doc, _| {
+    let (parent, contents_id, changed, warnings) = s.edit(label, |doc, _| {
         let contents_id = smart(doc, id)?.contents_id;
         let changed = instances(doc, contents_id);
+        let mut warnings = std::collections::BTreeSet::new();
         for &instance in &changed {
             smart_mut(doc, instance)?.source = new.clone();
             if !keep_psd {
                 detach_psd(doc.layer_mut(instance).ok_or(EngineError::NoLayer(instance))?);
             }
+            warnings
+                .extend(unapplied_filters(smart(doc, instance)?).into_iter().map(|n| format!("the {n} smart filter is not supported, so it was not applied")));
             refresh_or_fail(doc, instance)?;
         }
-        Ok((doc.id, contents_id, changed))
+        Ok((doc.id, contents_id, changed, warnings))
     })?;
     // An old editor must not overwrite newly replaced/relinked contents on close. Keep its
     // document open, but the next Edit Contents opens the replacement source.
     s.smart_links.retain(|l| l.parent != parent || l.contents_id != contents_id);
     // Every instance changed, not only `layer`: list them, so a caller doesn't repeat the
     // command once per copy (#4075).
-    Ok(json!({"layer": id.0, "instances": changed.iter().map(|l| l.0).collect::<Vec<_>>()}))
+    Ok(json!({"layer": id.0, "instances": changed.iter().map(|l| l.0).collect::<Vec<_>>(), "warnings": warnings}))
 }
 
 fn replace_contents(s: &mut Session, p: &Value) -> Result<Value> {
@@ -1285,6 +1351,13 @@ fn not_smart(s: &Session) -> std::result::Result<(), String> {
     if active_smart(s).is_ok() { Err("the layer is already a smart object".into()) } else { Ok(()) }
 }
 
+/// Convert to Smart Object: refused only when the single targeted layer is already a smart
+/// object. A multi-layer selection can still be combined (nesting any smart object in it).
+fn convertible_to_smart(s: &Session) -> std::result::Result<(), String> {
+    convertible(s)?;
+    if crate::layer_multi_cmds::selected(s).len() <= 1 { not_smart(s) } else { Ok(()) }
+}
+
 macro_rules! spec {
     ($id:literal, $label:literal, $menu:expr, $params:literal, $en:expr, $run:expr) => {
         CommandSpec { id: $id, label: $label, menu: $menu, shortcut: None, params: $params, enabled: $en, run: $run, journal: true }
@@ -1301,7 +1374,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Convert to Smart Object",
             SO,
             r##"{"layer":id?} (default: combine selected layers)"##,
-            convertible,
+            convertible_to_smart,
             convert
         ),
         spec!(

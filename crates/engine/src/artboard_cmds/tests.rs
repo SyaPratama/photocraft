@@ -85,6 +85,34 @@ fn from_layers_and_group_then_compose_clips() {
     }
 }
 
+/// #7945: one layer selected inside an artboard aligns to that artboard, as in Photoshop, not to
+/// the canvas (which would move it out of the board). The board itself still aligns to the canvas.
+#[test]
+fn a_lone_layer_in_an_artboard_aligns_to_the_artboard() {
+    for depth in [8, 16, 32] {
+        let mut s = session(depth);
+        let red = add_square(&mut s, Rect::new(10, 10, 20, 20), [1.0, 0.0, 0.0, 1.0]);
+        let board = LayerId(s.execute("layer.new.artboardFromLayers", json!({})).unwrap()["layer"].as_u64().unwrap());
+        s.execute("layer.artboard.set", json!({"x": 140, "y": 20, "width": 40, "height": 50})).unwrap();
+        let bounds = |s: &Session, id: LayerId| crate::layer_multi_cmds::layer_bounds(doc(s).layer(id).unwrap()).unwrap();
+        assert_eq!(bounds(&s, red), Rect::new(140, 20, 150, 30), "{depth}");
+
+        s.execute("layer.select", json!({"layer": red.0})).unwrap();
+        s.execute("layer.align.rightEdges", json!({})).unwrap();
+        assert_eq!(bounds(&s, red), Rect::new(170, 20, 180, 30), "{depth}: to the board's right edge");
+        s.execute("layer.align.verticalCenters", json!({})).unwrap();
+        assert_eq!(bounds(&s, red), Rect::new(170, 40, 180, 50), "{depth}: to the board's centre");
+        // An explicit `to` still wins.
+        s.execute("layer.align.topEdges", json!({"to": "canvas"})).unwrap();
+        assert_eq!(bounds(&s, red).y0, 0, "{depth}");
+
+        // The artboard alone has no board around it: its contents align to the canvas.
+        s.execute("layer.select", json!({"layer": board.0})).unwrap();
+        s.execute("layer.align.leftEdges", json!({})).unwrap();
+        assert_eq!(bounds(&s, red).x0, 0, "{depth}");
+    }
+}
+
 #[test]
 fn clear_artboard_guides_only_inside() {
     let mut s = session(8);

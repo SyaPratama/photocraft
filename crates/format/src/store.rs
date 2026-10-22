@@ -18,6 +18,10 @@ use crate::{FormatError, LoadOptions, Result, SaveOptions};
 pub(crate) const MANIFEST: &str = "manifest.json";
 pub(crate) const THUMB: &str = "thumb.png";
 pub(crate) const COMPOSITE: &str = "composite/preview.png";
+/// The file a directory save holds an exclusive lock on for its whole transaction (#4957).
+pub(crate) const SAVE_LOCK: &str = "save.lock";
+/// How long a directory save waits for another save of the same bundle to finish.
+const SAVE_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 fn tile_path(h: &str) -> String {
     format!("tiles/{h}.zst")
@@ -390,6 +394,8 @@ pub struct PcraftWriter {
     compressed_budget: usize,
     verified_directory: Option<DirectoryVerificationCache>,
     reverify_budget: u64,
+    /// How long [`Self::save_dir`] waits for another save of the bundle ([`SAVE_LOCK_WAIT`]).
+    lock_wait: std::time::Duration,
 }
 
 impl Default for PcraftWriter {
@@ -401,6 +407,35 @@ impl Default for PcraftWriter {
             compressed_budget: usize::MAX,
             verified_directory: None,
             reverify_budget: DEFAULT_REVERIFY_BUDGET,
+            lock_wait: SAVE_LOCK_WAIT,
+        }
+    }
+}
+
+/// Hold `dir`'s [`SAVE_LOCK`] for a directory save, so two writers (two stores, or two
+/// processes) can't interleave: each lists the existing objects, writes its own, publishes its
+/// manifest and removes what that manifest doesn't reference. Interleaved, one writer's cleanup
+/// could remove an object the other's winning manifest needs (#4957). The lock is the OS's
+/// advisory file lock, released when the returned file is dropped or the process ends, so a
+/// crash leaves no stale lock. Another save holding it is waited for up to `wait`; after that the
+/// save fails without writing anything. A file system without file locks (some network shares)
+/// saves unlocked, as before.
+fn lock_bundle(dir: &Path, wait: std::time::Duration) -> Result<Option<std::fs::File>> {
+    let path = dir.join(SAVE_LOCK);
+    validate_bundle_file(dir, &path)?;
+    let file = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(&path)?;
+    let start = std::time::Instant::now();
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(Some(file)),
+            Err(std::fs::TryLockError::WouldBlock) if start.elapsed() < wait => std::thread::sleep(std::time::Duration::from_millis(20)),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                return Err(FormatError::Io(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    format!("another save of {} is in progress; nothing was written", dir.display()),
+                )));
+            }
+            Err(std::fs::TryLockError::Error(_)) => return Ok(None),
         }
     }
 }
@@ -552,7 +587,11 @@ fn validate_bundle_file(root: &Path, path: &Path) -> Result<()> {
     plain_file_or_missing(path)
 }
 
-fn write_bundle_file(root: &Path, path: &Path, data: &[u8]) -> Result<()> {
+/// Publish a validated bundle entry through a flushed temporary file and replacing rename.
+/// On Windows, propagate a failed directory barrier even though the new entry is already visible.
+fn write_bundle_file(root: &Path, path: &Path, data: &[u8], fs: &dyn crate::atomic::AtomicFs) -> Result<()> {
+    #[cfg(not(windows))]
+    let _ = fs;
     validate_bundle_file(root, path)?;
     let parent = path.parent().ok_or_else(|| unsafe_bundle_entry(path))?;
     let name = path.file_name().ok_or_else(|| unsafe_bundle_entry(path))?;
@@ -589,6 +628,10 @@ fn write_bundle_file(root: &Path, path: &Path, data: &[u8]) -> Result<()> {
         // itself, never its referent, even if one appears after this check.
         validate_bundle_file(root, path)?;
         crate::atomic::retry_rename(crate::atomic::RenameRetry::platform(), || std::fs::rename(&tmp, path))?;
+        #[cfg(windows)]
+        {
+            fs.sync_dir(parent).map_err(|e| crate::atomic::publication_error(e, path))?;
+        }
         #[cfg(unix)]
         {
             let _ = std::fs::File::open(parent).and_then(|d| d.sync_all());
@@ -763,6 +806,12 @@ impl PcraftWriter {
         self.compressed.clear();
     }
 
+    /// How long a directory save waits for another save of the same bundle to finish before
+    /// failing without writing anything (10 s by default; see [`Self::save_dir`]).
+    pub fn set_lock_wait(&mut self, wait: std::time::Duration) {
+        self.lock_wait = wait;
+    }
+
     fn prepare(&mut self, doc: &Document, opts: &SaveOptions) -> Result<Prepared> {
         self.hash_cache.retain(|_, (w, _)| w.strong_count() > 0);
         self.blob_hash_cache.retain(|_, (w, _)| w.strong_count() > 0);
@@ -844,10 +893,18 @@ impl PcraftWriter {
 
     /// Save into a directory bundle: reuses only valid existing objects,
     /// rewrites missing or damaged objects, then writes the manifest
-    /// atomically and removes unreferenced objects.
+    /// atomically and removes unreferenced objects. The whole save holds the bundle's
+    /// `save.lock`, so saves of one bundle from other writers or processes wait their turn.
     pub fn save_dir(&mut self, doc: &Document, dir: &Path, opts: &SaveOptions) -> Result<SaveStats> {
+        self.save_dir_with(doc, dir, opts, &crate::atomic::RealFs)
+    }
+
+    /// The same save path with an injectable publication barrier, for failure/GC ordering tests.
+    fn save_dir_with(&mut self, doc: &Document, dir: &Path, opts: &SaveOptions, fs: &dyn crate::atomic::AtomicFs) -> Result<SaveStats> {
         let canonical_dir = bundle_root(dir)?;
         let dir = canonical_dir.as_path();
+        // Held until the end of the save: listing, writing, publishing and cleanup (#4957).
+        let _lock = lock_bundle(dir, self.lock_wait)?;
         let existing = list_objects(dir)?;
         // Reject a hostile existing entry before writing any object or manifest. This also
         // covers entries that this save would otherwise leave untouched or garbage-collect.
@@ -901,7 +958,7 @@ impl PcraftWriter {
                 Object::Tile(..) => stats.tiles_written += 1,
                 Object::Blob(_) => stats.blobs_written += 1,
             }
-            write_bundle_file(dir, &object_path, &obj.compressed())?;
+            write_bundle_file(dir, &object_path, &obj.compressed(), fs)?;
             let written = path_signature(&object_path)?;
             if let Some(cache) = &mut self.verified_directory {
                 match written {
@@ -915,12 +972,22 @@ impl PcraftWriter {
             }
         }
         for (name, data) in &p.previews {
-            write_bundle_file(dir, &dir.join(name), data)?;
+            write_bundle_file(dir, &dir.join(name), data, fs)?;
         }
         // Pin all GC directories before removing stale previews or objects.
         // Unix cleanup then stays within these directories even if a pathname is swapped.
         let gc = BundleGc::new(dir)?;
-        write_bundle_file(dir, &dir.join(MANIFEST), &p.manifest)?;
+        #[cfg(windows)]
+        {
+            // A previous attempt may have published an object and then failed its directory
+            // flush. The retry can reuse those valid bytes (including cached ones), so flush
+            // both object directories again before publishing a manifest that references them.
+            // This also persists the fixed subdirectories of a newly created bundle.
+            for sub in ["tiles", "blobs"] {
+                fs.sync_dir(&dir.join(sub)).map_err(|e| crate::atomic::publication_error(e, &dir.join(sub)))?;
+            }
+        }
+        write_bundle_file(dir, &dir.join(MANIFEST), &p.manifest, fs)?;
         // Omitted previews belong to the previous manifest until the new one commits.
         // After commit, a locked leftover is only housekeeping, just like unused objects.
         for stale in [THUMB, COMPOSITE] {
@@ -1118,3 +1185,6 @@ pub(crate) fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
     crate::atomic::atomic_write(path, data)?;
     Ok(())
 }
+
+#[cfg(all(test, windows))]
+mod durability_tests;

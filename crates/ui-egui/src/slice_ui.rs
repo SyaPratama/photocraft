@@ -292,6 +292,39 @@ fn selected_id(app: &mut PhotocraftApp, promote: bool) -> Option<u32> {
     }
 }
 
+/// Delete or Backspace with no modifiers, with the Slice Select tool and a slice selected,
+/// deletes that slice, as in Photoshop (#7862). It never reaches Layer › Delete or Edit › Clear.
+/// An auto slice has nothing to delete, and View › Lock Slices refuses with a message.
+pub fn keys(app: &mut PhotocraftApp, ctx: &egui::Context) -> bool {
+    use crate::shortcut_dispatch::Focus;
+    // Text fields and widgets that delete with these keys themselves keep them.
+    if app.ui.tool != Tool::SliceSelect
+        || app.ui.slices.selected.is_none()
+        || app.ui.text_edit.is_some()
+        || matches!(Focus::of(ctx), Focus::Text | Focus::DeletingWidget)
+    {
+        return false;
+    }
+    let mods = ctx.input(|i| i.modifiers);
+    if !mods.is_none() || !ctx.input_mut(|i| i.consume_key(mods, egui::Key::Delete) || i.consume_key(mods, egui::Key::Backspace)) {
+        return false;
+    }
+    let result = if app.session.file_menu.slices_locked {
+        Err(tl!("Slices are locked (View › Lock Slices)").to_string())
+    } else {
+        match selected_id(app, false) {
+            Some(id) => app.run("slice.delete", json!({"slice": id})).map(|_| app.ui.slices.selected = None),
+            // An auto slice is made from the user slices around it: it goes when they do.
+            None => Ok(()),
+        }
+    };
+    if let Err(e) = result {
+        app.ui.status = e;
+        app.ui.status_error = true;
+    }
+    true
+}
+
 /// Slice Options dialog for the selected slice (auto slices are promoted on OK).
 pub fn open_options(app: &mut PhotocraftApp) -> Result<Value, String> {
     let n = app.ui.slices.selected.ok_or("select a slice with the Slice Select tool")?;
@@ -501,6 +534,60 @@ mod tests {
         pointer(&mut app, ToolEvent::Down { x: 52.0, y: 46.0, pressure: 1.0 }, m);
         pointer(&mut app, ToolEvent::Up { x: 70.0, y: 70.0 }, m);
         assert_eq!(rect(&app), photocraft_geom::Rect::new(6, 11, 52, 46));
+    }
+
+    /// Delete through the app's shortcut handling, as the canvas gets it.
+    fn press(app: &mut PhotocraftApp, key: egui::Key) {
+        let ctx = egui::Context::default();
+        let m = egui::Modifiers::NONE;
+        let raw = egui::RawInput {
+            events: vec![egui::Event::ModifiersChanged(m), egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: m }],
+            ..Default::default()
+        };
+        ctx.begin_pass(raw);
+        crate::shortcuts::handle(app, &ctx);
+        ctx.end_pass().textures_delta.clear();
+    }
+
+    /// #7862: with Slice Select, Delete (or Backspace) deletes the selected slice, never the
+    /// layer: in a one-layer document that used to fail with "a document must keep at least one
+    /// layer". Locked slices refuse; an auto slice has nothing to delete.
+    #[test]
+    fn delete_deletes_the_selected_slice_not_the_layer() {
+        let m = egui::Modifiers::NONE;
+        for key in [egui::Key::Delete, egui::Key::Backspace] {
+            let mut app = app();
+            let layers = app.session.active().unwrap().doc.layers.len();
+            app.ui.tool = Tool::Slice;
+            pointer(&mut app, ToolEvent::Down { x: 10.0, y: 10.0, pressure: 1.0 }, m);
+            pointer(&mut app, ToolEvent::Up { x: 40.0, y: 30.0 }, m);
+            app.ui.tool = Tool::SliceSelect;
+            pointer(&mut app, ToolEvent::Down { x: 20.0, y: 20.0, pressure: 1.0 }, m);
+            pointer(&mut app, ToolEvent::Up { x: 20.0, y: 20.0 }, m);
+            assert!(app.ui.slices.selected.is_some());
+
+            // Locked: the slice stays, and says why.
+            app.run("view.lockSlices", json!({"on": true})).unwrap();
+            press(&mut app, key);
+            assert_eq!(app.session.active().unwrap().doc.slices.list.len(), 1, "{key:?}: locked");
+            assert!(app.ui.status_error && app.ui.status.contains("locked"), "{key:?}: {}", app.ui.status);
+            app.run("view.lockSlices", json!({"on": false})).unwrap();
+            app.ui.status_error = false;
+
+            press(&mut app, key);
+            let doc = app.session.active().unwrap().doc.clone();
+            assert!(doc.slices.list.is_empty(), "{key:?}: the slice is deleted");
+            assert_eq!(doc.layers.len(), layers, "{key:?}: the layer stays");
+            assert!(!app.ui.status_error, "{key:?}: {}", app.ui.status);
+            assert_eq!(app.ui.slices.selected, None);
+
+            // An auto slice: nothing to delete, and still not the layer.
+            pointer(&mut app, ToolEvent::Down { x: 90.0, y: 75.0, pressure: 1.0 }, m);
+            pointer(&mut app, ToolEvent::Up { x: 90.0, y: 75.0 }, m);
+            press(&mut app, key);
+            assert_eq!(app.session.active().unwrap().doc.layers.len(), layers, "{key:?}: auto slice");
+            assert!(!app.ui.status_error, "{key:?}: {}", app.ui.status);
+        }
     }
 
     #[test]

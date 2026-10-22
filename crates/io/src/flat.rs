@@ -92,7 +92,17 @@ fn cicp_profile(img: &Image) -> Option<Arc<Vec<u8>>> {
 /// milliseconds (a still GIF has one). One frame at a time becomes a document, so the caller
 /// can flatten and drop it. Returns the number of frames; stops at the first error `each` gives.
 pub fn import_gif_frames(name: &str, bytes: &[u8], each: &mut dyn FnMut(Document, u32) -> Result<(), IoError>) -> Result<usize, IoError> {
-    let frames = codecs::decode_gif_frames(bytes, &codecs::DecodeOptions::default())?;
+    import_frames(name, codecs::decode_gif_frames(bytes, &codecs::DecodeOptions::default())?, each)
+}
+
+/// Every frame of a WebP as a single-layer document, as [`import_gif_frames`] does for a GIF: an
+/// animation's frames composited onto its canvas, with their durations in milliseconds; a still
+/// WebP is one frame.
+pub fn import_webp_frames(name: &str, bytes: &[u8], each: &mut dyn FnMut(Document, u32) -> Result<(), IoError>) -> Result<usize, IoError> {
+    import_frames(name, codecs::decode_webp_frames(bytes, &codecs::DecodeOptions::default())?, each)
+}
+
+fn import_frames(name: &str, frames: Vec<codecs::AnimationFrame>, each: &mut dyn FnMut(Document, u32) -> Result<(), IoError>) -> Result<usize, IoError> {
     let n = frames.len();
     for f in frames {
         each(image_to_document(name, &f.image)?.document, f.delay_ms)?;

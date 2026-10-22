@@ -14,6 +14,8 @@ use serde_json::{Map, Value, json};
 use crate::PhotocraftApp;
 use crate::theme::Tokens;
 
+mod zoom_center;
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Kind {
     Range {
@@ -119,8 +121,8 @@ pub fn parse_spec(spec: &str) -> Vec<Param> {
             Kind::Grid(n)
         } else if let Some((range, default)) = v.split_once('=').map(|(a, b)| (a, b.trim())).or(Some((v, ""))) {
             if let Some((lo, hi)) = range.split_once("..") {
-                let min = lo.trim().parse().unwrap_or(0.0);
-                let max = hi.trim().parse().unwrap_or(100.0);
+                let min = leading_number(lo).unwrap_or(0.0);
+                let max = leading_number(hi).unwrap_or(100.0);
                 let default = default.parse().unwrap_or(min);
                 Kind::Range { min, max, default }
             } else {
@@ -132,6 +134,17 @@ pub fn parse_spec(spec: &str) -> Vec<Param> {
         out.push(Param { key, kind });
     }
     out
+}
+
+/// The number a range bound starts with, ignoring a unit or marker after it: `5000 px?` → 5000,
+/// `1000 %` → 1000. A bound that is not a number at all is `None`.
+fn leading_number(bound: &str) -> Option<f32> {
+    let b = bound.trim();
+    if let Ok(v) = b.parse() {
+        return Some(v);
+    }
+    let end = b.find(|c: char| !(c.is_ascii_digit() || matches!(c, '.' | '-' | '+'))).unwrap_or(b.len());
+    b.get(..end)?.parse().ok()
 }
 
 /// The inside of the spec's leading `{…}` object. Notes after it, like `→ {…}` results or
@@ -250,6 +263,10 @@ fn full_resolution_preview(command: &str, params: &Value) -> bool {
 pub fn preview_factor(command: &str, params: &Value, k: u32) -> u32 {
     if k <= 1 || full_resolution_preview(command, params) {
         return 1;
+    }
+    // A plug-in's pixel lengths are the params its manifest marks `"unit": "px"` (#7524).
+    if command == photocraft_engine::plugin_cmds::RUN {
+        return photocraft_engine::plugin_cmds::preview_factor(params, k);
     }
     let Some(spec) = photocraft_engine::commands::find(command) else { return k };
     let k = parse_spec(spec.params).into_iter().fold(k, |k, p| match p.kind {
@@ -775,6 +792,12 @@ pub fn body(ui: &mut egui::Ui, f: &mut Map<String, Value>) {
         crate::select_mask_view::controls(ui, f);
     }
     for p in parse_spec(&spec) {
+        if zoom_center::owns(&cmd, f) && matches!(p.key.as_str(), "centerX" | "centerY") {
+            if p.key == "centerX" {
+                zoom_center::row(ui, f);
+            }
+            continue;
+        }
         match p.kind {
             Kind::Range { min, max, default } => {
                 let mut v = f.get(&p.key).and_then(Value::as_f64).unwrap_or(default as f64) as f32;
@@ -888,6 +911,10 @@ pub fn body(ui: &mut egui::Ui, f: &mut Map<String, Value>) {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new(label(&p.key)).color(t.text_dim));
                     ui.add(egui::TextEdit::singleline(&mut v).desired_width(200.0));
+                    // Install Plug-in…: pick the .wasm file instead of typing its path (#7531).
+                    if cmd == "plugin.install" && p.key == "path" && crate::widgets::secondary_button(ui, tl!("Browse…"), 0.0).clicked() {
+                        f.insert(crate::dialogs::BROWSE_FIELD.into(), json!(p.key));
+                    }
                 });
                 if v.is_empty() {
                     f.remove(&p.key);
@@ -1167,7 +1194,12 @@ pub(crate) fn smart_preview_factor(doc: &Document, command: &str, params: &Value
 
 /// Scale the pixel-sized parameters of `command` down by the preview proxy factor `k`, keeping each above its minimum and negative lengths negative.
 fn scale_preview_params(command: &str, params: &mut Value, k: u32) {
-    if k > 1
+    if command == photocraft_engine::plugin_cmds::RUN {
+        // A plug-in declares its pixel lengths (`"unit": "px"` in its manifest), and only those
+        // are scaled: a 12 px shift previewed 4 times too wide at k = 4, and a unitless param that
+        // happens to be called `size` or `radius` must not be divided (#7524).
+        photocraft_engine::plugin_cmds::scale_for_preview(params, k);
+    } else if k > 1
         && let Some(o) = params.as_object_mut()
     {
         let spec = photocraft_engine::commands::find(command).map(|c| parse_spec(c.params)).unwrap_or_default();
@@ -1285,6 +1317,28 @@ impl FilterPreviewKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_unit_after_a_range_bound_does_not_reset_the_range_to_its_fallback() {
+        // #7598: `0.5..5000 px?` fell back to a maximum of 100, so the Mixer Brush's Size slider
+        // (and every range documented with a px or % suffix) topped out at 100.
+        let range = |spec: &str| match parse_spec(spec).into_iter().next().map(|p| p.kind) {
+            Some(Kind::Range { min, max, default }) => (min, max, default),
+            other => panic!("{spec}: {other:?}"),
+        };
+        assert_eq!(range(r#"{"size":0.5..5000 px?}"#), (0.5, 5000.0, 0.5));
+        assert_eq!(range(r#"{"scale":1..1000 %=100}"#), (1.0, 1000.0, 100.0));
+        assert_eq!(range(r#"{"tolerance":0.5..10 px=2}"#), (0.5, 10.0, 2.0));
+        assert_eq!(range(r#"{"angle":-180..180}"#), (-180.0, 180.0, -180.0));
+        assert_eq!(range(r#"{"radius":0.1..1000=1}"#), (0.1, 1000.0, 1.0));
+        assert_eq!(range(r#"{"gain":1e-3..2e2}"#), (0.001, 200.0, 0.001));
+        // A bound that is no number at all still takes the old fallback rather than failing.
+        assert_eq!(range(r#"{"x":0..many}"#), (0.0, 100.0, 0.0));
+        // The documented specs of the real commands read their full ranges.
+        let spec = photocraft_engine::commands::find("paint.pencil").expect("paint.pencil is registered");
+        let size = parse_spec(spec.params).into_iter().find(|p| p.key == "size");
+        assert!(matches!(size.map(|p| p.kind), Some(Kind::Range { max, .. }) if max == 5000.0));
+    }
 
     #[test]
     fn color_settings_working_spaces_list_installed_profiles_of_their_space() {
@@ -1854,6 +1908,12 @@ mod tests {
         assert!(missing.is_empty(), "missing Spanish dynamic labels: {missing:#?}");
     }
 
+    #[test]
+    fn russian_covers_generated_filter_options_and_gallery_names() {
+        let missing = missing_generated_filter_labels(crate::i18n::lang_from_tag("ru-RU").unwrap());
+        assert!(missing.is_empty(), "missing Russian dynamic labels: {missing:#?}");
+    }
+
     /// The Select menu's generated dialogs (Select and Mask, Modify ▸ …) show their
     /// params, choices and title in every UI language, not just Korean.
     #[test]
@@ -2387,12 +2447,24 @@ mod tests {
             _ => panic!("a smart object"),
         };
         let k = 4;
-        let shown = preview_document(&doc, Some(layer), "image.adjustments.curves", &json!({"points": [[0, 20], [90, 150], [255, 230]]}), k).unwrap();
+        let params = json!({"points": [[0, 20], [90, 150], [255, 230]]});
+        let shown = preview_document(&doc, Some(layer), "image.adjustments.curves", &params, k).unwrap();
+        let full = preview_document(&doc, Some(layer), "image.adjustments.curves", &params, 1).unwrap();
+        let photocraft_doc::LayerContent::Smart(full_sm) = &full.layer(layer).unwrap().content else { panic!("a smart object") };
+        let reference = photocraft_algo::resample::resize_surface(full_sm.cache.as_ref().unwrap(), 0.25, 0.25, photocraft_algo::resample::Resample::Bicubic);
         let photocraft_doc::LayerContent::Smart(sm) = &shown.layer(layer).unwrap().content else { panic!("a smart object") };
         assert_eq!(sm.smart_filters.len(), 1, "the preview adds the Curves smart filter");
         assert_eq!(shown.size, crate::proxy::proxy_document(&doc, k).size);
         // The 16 px square at (16, 16) is a 4 px square at (4, 4) on the proxy, not 16 px at (16, 16).
-        // Its corners are partly covered by the smart object's resampling (220/255), its inside fully.
+        // Bicubic reduction blends the square's boundary with transparency; compare all alpha
+        // values with a reduced full-size result, and require opacity only in the interior.
+        for y in 0..shown.size.height as i32 {
+            for x in 0..shown.size.width as i32 {
+                let expected = reference.pixel(x, y).last().copied().unwrap();
+                let actual = alpha(&shown, x, y);
+                assert!((actual - expected).abs() <= 1.0 / 255.0, "({x}, {y}): alpha {actual}, expected {expected}");
+            }
+        }
         for (x, y) in [(5, 5), (5, 6), (6, 6)] {
             assert!(alpha(&shown, x, y) > 0.99, "({x}, {y}) is inside the reduced square");
         }

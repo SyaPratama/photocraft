@@ -192,7 +192,7 @@ id = "TOOL-214-12"
 target = "Shapes: on-canvas corner radius handles, shape feather, selection to shape with tolerance"
 status = "done"
 issue = 214
-note = "On-canvas corner radius widgets on every selected live rectangle with Path Selection, the Rectangle tool and Move + Show Transform Controls: drag rounds every corner of every selected rectangle alike, Alt that corner on each, corner radius cursor and R: readout, one history step (corner_radius.rs, 2026-10-13); select.convertToShape with tolerance (vector_cmds.rs:1256); shape Density and Feather (Properties, layer.vectorMask.edit on a shape layer; the path as the fill's soft vector mask, Photoshop's 10 px feather ramp within 1 level; PSD mask parameters and .pcraft, #5846, 2026-10-15)"
+note = "On-canvas corner radius widgets on every selected live rectangle, triangle, polygon and star (LiveShape::Polygon corner_radius, shape.create/edit cornerRadius, vector shapes::round_corners) with Path Selection, the Rectangle/Triangle/Polygon tools and Move + Show Transform Controls: drag rounds every corner of every selected shape alike, Alt one corner of a rectangle, corner radius cursor and R: readout, one history step (corner_radius.rs, 2026-10-13); select.convertToShape with tolerance (vector_cmds.rs:1256); shape Density and Feather (Properties, layer.vectorMask.edit on a shape layer; the path as the fill's soft vector mask, Photoshop's 10 px feather ramp within 1 level; PSD mask parameters and .pcraft, #5846, 2026-10-15)"
 
 [[item]]
 id = "TOOL-214-13"

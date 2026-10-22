@@ -451,24 +451,16 @@ pub(crate) fn cursor(app: &mut PhotocraftApp, ctx: &egui::Context, xf: &ViewXfor
             return move_zone(app, q).map(|_| CursorIcon::Move);
         };
         let t = frame(app)?;
-        let direction = if handle < 4 {
-            let a = *t.quad.get(usize::from(handle))?;
-            let b = *t.quad.get((usize::from(handle) + 2) % 4)?;
-            [a[0] - b[0], a[1] - b[1]]
-        } else {
-            let b = if handle.is_multiple_of(2) { t.quad[3] } else { t.quad[1] };
-            [b[0] - t.quad[0][0], b[1] - t.quad[0][1]]
-        };
-        return Some(crate::tool_cursor::resize(direction, xf));
+        if handle < 4 {
+            return Some(crate::tool_cursor::corner_resize(&t.quad, usize::from(handle), xf));
+        }
+        let b = if handle.is_multiple_of(2) { t.quad[3] } else { t.quad[1] };
+        return Some(crate::tool_cursor::resize([b[0] - t.quad[0][0], b[1] - t.quad[0][1]], xf));
     }
     let Some(t) = frame(app) else { return Some(CursorIcon::Default) };
     let h = app.ui.type_transform.as_ref().map(|t| t.gesture.hit).or_else(|| hit(app, &t, xf.to_doc(p)));
     Some(match h {
-        Some(Hit::Corner(i)) => {
-            let q = *t.quad.get(i)?;
-            let opposite = *t.quad.get((i + 2) % 4)?;
-            crate::tool_cursor::resize([q[0] - opposite[0], q[1] - opposite[1]], xf)
-        }
+        Some(Hit::Corner(i)) => crate::tool_cursor::corner_resize(&t.quad, i, xf),
         Some(Hit::Edge(_)) => {
             // Original arrowhead indicator, above the canvas, without a proprietary cursor asset.
             let tokens = crate::theme::Tokens::get(ctx);

@@ -1573,6 +1573,53 @@ fn document_inspect_and_activate_invalid_index() {
     assert_eq!(err_act.to_string(), "no document at index 9");
 }
 
+/// #7103: Photoshop's Select Document by offset (previous is -1, next +1) walks the open
+/// documents in tab order from the active one. Past either end it is refused, not wrapped onto
+/// another document, and bad params leave the active document as it was.
+#[test]
+fn document_activate_by_offset_walks_the_tabs() {
+    let mut s = Session::new();
+    for name in ["a", "b", "c"] {
+        s.execute("file.new", json!({"width": 2, "height": 2, "name": name})).unwrap();
+    }
+    let active = |s: &Session| s.active().unwrap().doc.name.clone();
+    assert_eq!(active(&s), "c");
+    assert_eq!(s.execute("document.activate", json!({"offset": -2})).unwrap(), json!({"document": 0}));
+    assert_eq!(active(&s), "a");
+    assert_eq!(s.execute("document.activate", json!({"offset": 1})).unwrap(), json!({"document": 1}));
+    assert_eq!(active(&s), "b");
+    s.execute("document.activate", json!({"offset": 0})).unwrap();
+    assert_eq!(active(&s), "b");
+    assert_eq!(s.execute("document.activate", json!({"document": 2})).unwrap(), json!({"document": 2}));
+    // A null key counts as omitted.
+    s.execute("document.activate", json!({"document": null, "offset": -1})).unwrap();
+    assert_eq!(active(&s), "b");
+
+    let err = s.execute("document.activate", json!({"offset": 2})).unwrap_err().to_string();
+    assert_eq!(err, "no document 2 after the active one, which is 2 of 3");
+    let err = s.execute("document.activate", json!({"offset": -2})).unwrap_err().to_string();
+    assert_eq!(err, "no document 2 before the active one, which is 2 of 3");
+    for bad in [
+        json!({}),
+        json!({"offset": null}),
+        json!({"offset": 1.5}),
+        json!({"offset": "1"}),
+        json!({"offset": i64::MAX}),
+        json!({"offset": i64::MIN}),
+        json!({"offset": u64::MAX}),
+        json!({"document": 0, "offset": 1}),
+        json!({"document": -1}),
+    ] {
+        assert!(s.execute("document.activate", bad.clone()).is_err(), "{bad}");
+        assert_eq!(active(&s), "b", "{bad}");
+    }
+    // Tabs, not the order the documents were opened in: with "c" dragged to the front, two tabs
+    // before "b" is "c".
+    s.execute("document.move", json!({"document": 2, "to": 0})).unwrap();
+    s.execute("document.activate", json!({"offset": -2})).unwrap();
+    assert_eq!(active(&s), "c");
+}
+
 /// #2166, measured in Photoshop 25.1: a layer mask and the layer pixels keep separate
 /// foreground/background pairs, swapped when the edit target changes.
 #[test]

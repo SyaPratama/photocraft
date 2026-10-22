@@ -355,7 +355,7 @@ fn warp_type_layer(s: &mut Session, cmd: &str, id: LayerId, w: &Warp) -> Result<
     }
     s.edit("Warp", |doc, _| {
         let group = crate::transform_cmds::group_locks(doc, id);
-        let snapshot = doc.clone();
+        let (dpi, format) = (doc.resolution_dpi, doc.pixel_format());
         let l = doc.layer_mut(id).ok_or(EngineError::NoLayer(id))?;
         let locks = l.locks.union(group);
         if locks.position || locks.all {
@@ -363,7 +363,7 @@ fn warp_type_layer(s: &mut Session, cmd: &str, id: LayerId, w: &Warp) -> Result<
         }
         let LayerContent::Text(t) = &mut l.content else { return Err(EngineError::Other("not a type layer".into())) };
         t.warp = tw.clone();
-        crate::type_cmds::refresh(&snapshot, t);
+        crate::type_cmds::refresh_at(dpi, format, t);
         Ok(())
     })?;
     Ok(json!({"layer": id.0, "changed": true, "warp": tw}))

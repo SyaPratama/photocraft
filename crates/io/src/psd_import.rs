@@ -330,6 +330,19 @@ impl Ctx<'_> {
         // Blend If lives in the layer record's blending ranges.
         l.blend_if = crate::blocks::blend_if_from_ranges(&rec.blending_ranges);
         l.psd_id = rec.layer_id();
+        // The layer's XMP packet (`shmd` › `cust` › `layerXMP`) becomes the field; the rest of
+        // `shmd` stays in `psd_blocks`, where export puts the packet back.
+        if let Some(i) = l.psd_blocks.iter().position(|(k, _)| k == b"shmd")
+            && let Some((xmp, rest)) = photocraft_psd::metadata::take_layer_xmp(&l.psd_blocks[i].1)
+        {
+            l.xmp = Some(Arc::from(xmp));
+            match rest {
+                Some(data) => l.psd_blocks[i].1 = Arc::new(data),
+                None => {
+                    l.psd_blocks.remove(i);
+                }
+            }
+        }
         let name = l.name.clone();
         l.mask = self.record_mask(rec, &name);
     }

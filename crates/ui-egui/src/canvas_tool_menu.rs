@@ -758,6 +758,8 @@ fn choose_view(app: &mut PhotocraftApp, ctx: &Context, menu: &CanvasToolMenu, co
         let v = app.ui.views.get_mut(i).ok_or("no document view")?;
         v.fit_pending = false;
         v.fill_pending = true;
+        v.request_zoom_animation(app.session.prefs().general.animated_zoom);
+        v.zoom_anchor = None;
         return Ok(());
     }
     let before = app.ui.views.get(i).map(|v| (v.zoom, v.center));
@@ -773,6 +775,7 @@ fn choose_view(app: &mut PhotocraftApp, ctx: &Context, menu: &CanvasToolMenu, co
     // from the centre shrinks (or grows) by the zoom ratio, whatever the rotation or flip.
     let ratio = zoom0 / v.zoom;
     v.center = if center_on_point || !ratio.is_finite() { d } else { [d[0] - (d[0] - c[0]) * ratio, d[1] - (d[1] - c[1]) * ratio] };
+    v.zoom_anchor = (v.zoom_animating && !center_on_point).then_some(([d[0] as f64, d[1] as f64], menu.pos));
     Ok(())
 }
 
@@ -886,6 +889,23 @@ fn pen_dialog(app: &mut PhotocraftApp, command: &str, label: &str, name: &str) {
         }
     }
     spec_dialog(app, command, label, spec, fields);
+}
+
+/// The Pen options bar's Make Selection (Path mode, #5703): the canvas menu's Make Selection…
+/// dialog for the path being drawn (committed first, as the menu does) or the active path.
+pub(crate) fn make_selection(app: &mut PhotocraftApp) -> Result<(), String> {
+    let pending = app.ui.pen.as_ref().is_some_and(|p| p.knots.len() >= 2);
+    // Where `pen_commit` puts the path being drawn: a shape layer or the targeted vector mask,
+    // else the Paths panel path it adds to (a selected saved path, or the Work Path), which it
+    // selects so it is the active path.
+    let pending_layer = pending && (app.ui.tool_options.vector_mode == "shape" || crate::vector_ui::targeted_vector_mask(app).is_some());
+    if pending {
+        crate::vector_ui::pen_commit(app, false);
+    }
+    let name = if pending_layer { Some("layer".to_string()) } else { crate::vector_ui::active_path_name(app) }
+        .ok_or_else(|| "No path is available for this action".to_string())?;
+    pen_dialog(app, "path.toSelection", "Make Selection…", &name);
+    Ok(())
 }
 
 fn choose_pen(app: &mut PhotocraftApp, ctx: &Context, menu: &CanvasToolMenu, command: &str) -> Result<(), String> {
@@ -1559,6 +1579,53 @@ mod tests {
     }
 
     #[test]
+    fn animated_zoom_off_view_menu_keeps_the_anchor_without_a_transition() {
+        for command in ["view.zoomIn", "view.zoomOut", FILL_SCREEN] {
+            let mut app = zoom_app(400, 300);
+            app.ui.tool = Tool::Zoom;
+            app.run("prefs.set", json!({"values": {"general.animatedZoom": false, "tools.zoomClickedPointToCenter": false}})).unwrap();
+            let mut h = harness(app);
+            let doc = [300.0, 100.0];
+            let p = screen_of(h.state(), doc);
+            right_click(&mut h, p, Modifiers::NONE);
+            let ctx = h.ctx.clone();
+            choose(h.state_mut(), &ctx, command);
+            assert!(!h.state().ui.views[0].zoom_animating, "{command}");
+            h.step();
+            let v = &h.state().ui.views[0];
+            let xf = crate::canvas::ViewXform::active(h.state()).unwrap();
+            assert_eq!((xf.zoom, xf.center), (v.zoom, v.center), "{command}");
+            assert!(v.zoom_anchor.is_none() && v.zoom_transition.is_none(), "{command}");
+            if command != FILL_SCREEN {
+                assert!(screen_of(h.state(), doc).distance(p) < 1.0, "{command}: preserve the clicked point");
+            }
+        }
+    }
+
+    #[test]
+    fn view_menu_zoom_keeps_its_anchor_during_the_animation() {
+        let mut app = zoom_app(400, 300);
+        app.ui.tool = Tool::Zoom;
+        let mut h = harness(app);
+        let zoom = h.state().ui.views[0].zoom;
+        let doc = [300.0, 100.0];
+        let p = screen_of(h.state(), doc);
+        right_click(&mut h, p, Modifiers::NONE);
+        let ctx = h.ctx.clone();
+        // Choose without the widget click helper, which runs repaint frames until settled.
+        choose(h.state_mut(), &ctx, "view.zoomIn");
+        h.step();
+        h.input_mut().time = Some(ctx.input(|i| i.time) + 0.11);
+        h.step();
+        let displayed = crate::canvas::ViewXform::active(h.state()).unwrap();
+        assert!(displayed.zoom > zoom && displayed.zoom < h.state().ui.views[0].zoom);
+        assert!(displayed.to_screen(doc[0], doc[1]).distance(p) < 1.0);
+        h.input_mut().time = Some(ctx.input(|i| i.time) + 0.3);
+        h.step();
+        assert!(!h.state().ui.views[0].zoom_animating);
+    }
+
+    #[test]
     fn view_menu_zoom_in_centres_the_clicked_point_with_the_preference() {
         let mut app = zoom_app(400, 300);
         app.ui.tool = Tool::Hand;
@@ -1670,6 +1737,42 @@ mod tests {
         crate::dialogs::confirm(&mut app, dialog).unwrap();
         assert!(app.session.active().unwrap().doc.work_path.is_some());
         assert!(app.session.active().unwrap().doc.selection.is_some());
+    }
+
+    /// #5703: the Pen options bar's Make Selection (Path mode) opens the same dialog for the path
+    /// being drawn (finished into the Work Path first), and OK selects inside it; with no path at
+    /// all it reports that instead.
+    #[test]
+    fn pen_options_bar_makes_a_selection_from_the_path() {
+        let mut app = app();
+        app.ui.tool = Tool::Pen;
+        assert!(make_selection(&mut app).is_err(), "no path yet");
+        assert!(app.ui.dialogs.is_empty());
+        for (x, y) in [(2.0, 2.0), (20.0, 2.0), (20.0, 20.0)] {
+            crate::vector_ui::pen_down(&mut app, x, y, false);
+            crate::vector_ui::pen_up(&mut app);
+        }
+        make_selection(&mut app).unwrap();
+        let dialog = app.ui.dialogs.last().map(|d| d.id).unwrap();
+        crate::dialogs::confirm(&mut app, dialog).unwrap();
+        let st = app.session.active().unwrap();
+        assert!(st.doc.work_path.is_some() && st.doc.selection.is_some());
+        // The active (Work) path again, with no pen path in progress.
+        app.run("select.deselect", json!({})).unwrap();
+        make_selection(&mut app).unwrap();
+        let dialog = app.ui.dialogs.last().map(|d| d.id).unwrap();
+        crate::dialogs::confirm(&mut app, dialog).unwrap();
+        assert!(app.session.active().unwrap().doc.selection.is_some());
+        // Drawn with a saved path selected, the path is added to that one (#4721): the dialog is
+        // for it, not for a Work Path.
+        app.run("path.rename", json!({"name": "work", "to": "Cutout"})).unwrap();
+        app.ui.selected_path = Some("Cutout".into());
+        for (x, y) in [(4.0, 24.0), (12.0, 24.0), (12.0, 30.0)] {
+            crate::vector_ui::pen_down(&mut app, x, y, false);
+            crate::vector_ui::pen_up(&mut app);
+        }
+        make_selection(&mut app).unwrap();
+        assert_eq!(app.ui.dialogs.last().and_then(|d| d.fields.get("name")), Some(&json!("Cutout")));
     }
 
     /// #1056: the Path Selection and Direct Selection tools' right-click opens the path menu for

@@ -81,6 +81,8 @@ pub struct ActionsFile {
     pub actions: Vec<Action>,
 }
 
+pub const MAX_PLAYBACK_STEPS: u64 = 100_000;
+
 /// Actions list and the recording / playback flags. Only `list` is persisted.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -95,6 +97,9 @@ pub struct ActionState {
     /// Active action names, for cycle detection in engine and desktop playback.
     #[serde(skip)]
     pub playback_stack: Vec<String>,
+    /// Number of steps executed by the current top-level playback tree.
+    #[serde(skip)]
+    pub playback_steps: u64,
     /// Bumped whenever `list` changes, so the preset store can skip unchanged writes.
     #[serde(skip)]
     pub rev: u64,
@@ -143,6 +148,15 @@ pub fn save_target_closed(s: &Session, id: &str, target: Option<photocraft_doc::
     })
 }
 
+/// Charge one step against the complete nested playback tree.
+pub fn consume_playback_step(s: &mut Session) -> bool {
+    if s.actions.playback_steps >= MAX_PLAYBACK_STEPS {
+        false
+    } else {
+        s.actions.playback_steps += 1;
+        true
+    }
+}
 /// View-only menu commands recorded by the desktop shell. Headless playback reports
 /// them as unsupported instead of silently dropping them; Batch and droplets skip them.
 pub fn shell_view_command(id: &str) -> bool {
@@ -348,6 +362,10 @@ fn run_recorded(s: &mut Session, action: &Action, from: usize) -> (u64, Option<V
     let mut ran = 0u64;
     let mut failed = None;
     for (i, (id, params)) in action.enabled_steps().skip_while(|(i, _)| *i < from) {
+        if !consume_playback_step(s) {
+            failed = Some(json!({"step": i, "id": id, "error": format!("action playback exceeded the {}-step limit", MAX_PLAYBACK_STEPS)}));
+            break;
+        }
         if let Some(auth) = s.authorize
             && let Err(e) = auth(id, params)
         {
@@ -379,6 +397,9 @@ fn run_recorded(s: &mut Session, action: &Action, from: usize) -> (u64, Option<V
 /// for diagnostics, but record just the named call in the parent action.
 pub fn begin_playback(s: &mut Session, action: &Action) -> Result<Option<(usize, usize)>> {
     flush_recording(s)?;
+    if s.actions.playing == 0 {
+        s.actions.playback_steps = 0;
+    }
     let recording = s.actions.recording.take();
     s.actions.playing = s.actions.playing.saturating_add(1);
     s.actions.playback_stack.push(action.name.clone());
@@ -389,13 +410,18 @@ pub fn finish_playback(s: &mut Session, recording: Option<(usize, usize)>, actio
     s.actions.playback_stack.pop();
     s.actions.playing = s.actions.playing.saturating_sub(1);
     if let Some((_, idx)) = recording {
-        s.actions.recording = Some((s.journal.len(), idx));
-        let mut params = json!({"action": action.name});
-        if from > 0 {
-            params["from"] = json!(from);
-        }
-        s.journal.push(("actions.play".into(), params));
+        restore_recording(s, idx, &action.name, from);
     }
+}
+
+/// Resume recording into action `idx` and journal the named call that suspended it.
+pub fn restore_recording(s: &mut Session, idx: usize, action: &str, from: usize) {
+    s.actions.recording = Some((s.journal.len(), idx));
+    let mut params = json!({"action": action});
+    if from > 0 {
+        params["from"] = json!(from);
+    }
+    s.journal.push(("actions.play".into(), params));
 }
 
 /// Nested playback returns a structured failure even though the command itself succeeded.
@@ -1141,6 +1167,43 @@ mod tests {
         }
     }
 
+    /// An Alt-drag copy records `inPlace` (#7200), which only matters for an artboard: a plain
+    /// layer's recorded copy must still export to .atn, while an artboard's must be refused rather
+    /// than exported as a copy beside the original.
+    #[test]
+    fn recorded_in_place_duplicate_keeps_in_place_only_for_artboards() {
+        let mut s = Session::new();
+        s.execute("file.new", json!({"width": 8, "height": 8})).unwrap();
+        s.execute("actions.record", json!({"name": "Layer copy"})).unwrap();
+        s.execute("layer.duplicate", json!({"inPlace": true})).unwrap();
+        s.execute("actions.stop", json!({})).unwrap();
+        s.execute("layer.new.artboard", json!({"name": "Board", "rect": [0, 0, 8, 8]})).unwrap();
+        s.execute("actions.record", json!({"name": "Board copy"})).unwrap();
+        s.execute("layer.duplicate", json!({"inPlace": true})).unwrap();
+        s.execute("actions.stop", json!({})).unwrap();
+        assert_eq!(s.actions.list[0].steps, vec![("layer.duplicate".to_string(), json!({}))]);
+        assert_eq!(s.actions.list[1].steps, vec![("layer.duplicate".to_string(), json!({"inPlace": true}))]);
+        assert!(crate::atn_cmds::export("Audit", &[&s.actions.list[0]], &[], false).is_ok());
+        assert!(crate::atn_cmds::export("Audit", &[&s.actions.list[1]], &[], false).is_err());
+        // Several selected layers are copied together: one artboard among them keeps `inPlace`.
+        let mut s = Session::new();
+        s.execute("file.new", json!({"width": 8, "height": 8})).unwrap();
+        let photo = s.active().unwrap().active_layer.unwrap();
+        s.execute("layer.new.layer", json!({"name": "Logo"})).unwrap();
+        s.execute("layer.select", json!({"layer": photo.0, "mode": "add"})).unwrap();
+        s.execute("actions.record", json!({"name": "Layers copy"})).unwrap();
+        s.execute("layer.duplicate", json!({"inPlace": true})).unwrap();
+        s.execute("actions.stop", json!({})).unwrap();
+        assert_eq!(s.active().unwrap().selected_layers().len(), 2, "both layers were copied");
+        s.execute("layer.new.artboard", json!({"name": "Board", "rect": [0, 0, 8, 8]})).unwrap();
+        s.execute("layer.select", json!({"layer": photo.0, "mode": "add"})).unwrap();
+        s.execute("actions.record", json!({"name": "Mixed copy"})).unwrap();
+        s.execute("layer.duplicate", json!({"inPlace": true})).unwrap();
+        s.execute("actions.stop", json!({})).unwrap();
+        assert_eq!(s.actions.list[0].steps, vec![("layer.duplicate".to_string(), json!({}))]);
+        assert_eq!(s.actions.list[1].steps, vec![("layer.duplicate".to_string(), json!({"inPlace": true}))]);
+    }
+
     #[test]
     fn named_selection_preserves_modes_and_duplicate_occurrences() {
         let mut s = Session::new();
@@ -1581,5 +1644,18 @@ mod tests {
             assert!(s.execute("actions.setColor", bad).is_err());
         }
         assert!(s.actions.list[0].color.is_empty(), "rejected colours change nothing");
+    }
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+
+    #[test]
+    fn playback_budget_is_shared_by_nested_calls() {
+        let mut session = Session::new();
+        session.actions.playback_steps = MAX_PLAYBACK_STEPS - 1;
+        assert!(consume_playback_step(&mut session));
+        assert!(!consume_playback_step(&mut session));
     }
 }
