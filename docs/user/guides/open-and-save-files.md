@@ -25,7 +25,7 @@ PhotoCraft opens PSD and PSB (including 16-bit, 32-bit, CMYK and Lab files), lay
 
 After that, **File › Save** saves into the same file. **File › Save a Copy…** saves a copy under a new name. While a large file saves, the status bar and the tab title show "Saving" with a percentage.
 
-The **Save As…** dialog also lists OpenRaster, PNG, JPEG, WebP, TIFF, Targa, OpenEXR and FITS. **File › Save** on an opened JPEG keeps its quality, and on a WebP keeps it lossy or lossless. Check the file extension in the name box: PhotoCraft writes the format that the extension names. If you want a flat PNG or JPEG with a size and quality preview, use [Export an image](export-an-image.md) instead.
+The **Save As…** dialog also lists SVG (`.svg`, `.svgz`), OpenRaster, PNG, JPEG, WebP, TIFF, Targa, OpenEXR and FITS. **File › Save** on an opened JPEG keeps its quality, and on a WebP keeps it lossy or lossless. Check the file extension in the name box: PhotoCraft writes the format that the extension names. If you want a flat PNG or JPEG with a size and quality preview, use [Export an image](export-an-image.md) instead.
 
 ## Good to know
 

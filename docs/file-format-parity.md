@@ -41,7 +41,7 @@ XL are missing (gap G10). Remaining: 300–500 h including PSD fidelity.
 | Photoshop PDF | R/W | no (#2541) | yes, one flattened page (Save As / Save a Copy / CLI, #3401; also print and artboards-to-PDF) | No vector/text PDF, no multi-page save, no PDF presentation, layers are not preserved (FILE-215-10); read still missing (#2541) |
 | Photoshop EPS, DCS 1.0/2.0, EPS TIFF/PICT preview | R/W | no | no | |
 | Generic EPS / AI | R (rasterize) | no | no | |
-| SVG | R (rasterize) | yes, as editable shape layers or a vector smart object | no | Better than Photoshop for editing; gradients approximated (FILE-215-9) |
+| SVG | R (rasterize) | yes, as editable shape layers or a vector smart object | yes, .svg and .svgz (Save As / Export As / CLI: shape layers as vector paths, text layers as text, raster layers as base64 PNG) | Better than Photoshop (Photoshop only rasterizes on read; PhotoCraft reads as shapes and writes clean SVG/SVGZ) |
 | JPEG 2000 | R/W | no (#1047) | no | |
 | Cineon / DPX | R (DPX), R/W (CIN) | DPX: luma, RGB, RGBA at 8/10/12/16 bits, both byte orders (#1049); Cineon: 10-bit gray/RGB, read-only | DPX: 8/10/12/16 bits (`dpxBits`, `--dpx-bits`); Cineon no | Writes DPX, which Photoshop only reads; header fields (creator, project, copyright, transfer, frame rate, time code…) round-trip; Cineon read-only, no RLE |
 | DICOM | R/W | no | no | |

@@ -82,10 +82,6 @@ choice!(
     /// platforms ignore it.
     LinuxDisplayServer { Auto = "auto", X11 = "x11" } default Auto
 );
-choice!(
-    /// Unit for the autosave interval in the Preferences dialog.
-    AutosaveUnit { Seconds = "seconds", Minutes = "minutes" } default Minutes
-);
 choice!(UiFontSize { Tiny = "tiny", Small = "small", Medium = "medium", Large = "large" } default Small);
 choice!(LogDestination { Metadata = "metadata", TextFile = "textFile", Both = "both" } default Metadata);
 choice!(LogDetail { SessionsOnly = "sessionsOnly", Concise = "concise", Detailed = "detailed" } default Concise);
@@ -455,8 +451,6 @@ pub struct FileHandling {
     pub autosave: bool,
     /// Seconds between autosaves of documents with unsaved changes.
     pub autosave_interval_secs: u32,
-    /// Display unit for the autosave interval in the Preferences dialog.
-    pub autosave_unit: AutosaveUnit,
     /// Offer to reopen recovered documents at launch.
     pub recover_on_launch: bool,
     /// Open a file with no ICC profile as untagged even when its EXIF ColorSpace tag says sRGB.
@@ -481,7 +475,6 @@ impl Default for FileHandling {
             save_in_background: true,
             autosave: true,
             autosave_interval_secs: 600,
-            autosave_unit: AutosaveUnit::Minutes,
             recover_on_launch: true,
             ignore_exif_profile_tag: false,
             exr_aces_cg: false,
@@ -1113,7 +1106,6 @@ pub fn choices(path: &str) -> Option<&'static [&'static str]> {
         "interface.uiFontSize" => UiFontSize::NAMES,
         "historyLog.destination" => LogDestination::NAMES,
         "historyLog.detail" => LogDetail::NAMES,
-        "fileHandling.autosaveUnit" => AutosaveUnit::NAMES,
         "fileHandling.imagePreviews" | "fileHandling.maximizePsdCompatibility" => Ask::NAMES,
         "export.quickExportFormat" => QuickExportFormat::NAMES,
         "export.quickExportLocation" => ExportLocation::NAMES,

@@ -1229,9 +1229,6 @@ fn humanize(key: &str) -> String {
     if key == "autosaveIntervalSecs" {
         return "Autosave Interval (seconds)".into();
     }
-    if key == "autosaveUnit" {
-        return "Autosave Unit".into();
-    }
     // Performance: presentation without vsync (#1343); like the other graphics settings, it
     // takes effect when the window next opens.
     if key == "lowLatencyDrawing" {
@@ -3196,7 +3193,7 @@ mod tests {
                 let Some(obj) = v.get(sec).and_then(Value::as_object) else { continue };
                 for k in obj.keys() {
                     if (sec == "interface" && k == "favoriteThemes")
-                        || (sec == "fileHandling" && (k == "autosaveIntervalSecs" || k == "autosaveUnit"))
+                        || (sec == "fileHandling" && k == "autosaveIntervalSecs")
                     {
                         continue;
                     }

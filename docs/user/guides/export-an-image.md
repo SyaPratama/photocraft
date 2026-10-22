@@ -1,6 +1,6 @@
 ---
 title: Export an image
-description: Export a PNG, JPG, WebP, TIFF or TGA from PhotoCraft with a preview, a size estimate and a scale.
+description: Export a PNG, JPG, WebP, SVG, TIFF or TGA from PhotoCraft with a preview, a size estimate and a scale.
 order: 50
 verified: 0.8.2
 ---
@@ -10,7 +10,7 @@ Choose **File › Export › Export As…**, set the format, and click **Export*
 ## Export with settings
 
 1. Choose **File › Export › Export As…**.
-2. Under **File Settings**, pick a **Format**: **PNG**, **JPG**, **WebP**, **TIFF** or **TGA**.
+2. Under **File Settings**, pick a **Format**: **PNG**, **JPG**, **WebP**, **SVG**, **TIFF** or **TGA**.
 3. Set the options for that format:
    - **JPG** and lossy **WebP** have a **Quality** slider from 1 to 100.
    - **WebP** also has a **Lossless** checkbox.
