@@ -1411,6 +1411,12 @@ impl Preferences {
             }
             _ => value,
         };
+        let (path, value) = if path == "fileHandling.autosaveIntervalSecs" {
+            let mins = value.as_f64().map(|s| (s / 60.0).round().max(1.0) as u64).unwrap_or(10);
+            ("fileHandling.autosaveMinutes", json!(mins))
+        } else {
+            (path, value)
+        };
         check_value(path, &value)?;
         let mut root = self.to_json();
         set_path(&mut root, path, value)?;
@@ -1868,6 +1874,13 @@ impl Session {
         }
         // Saved preferences before appearance modes had one concrete theme. Preserve its
         // appearance instead of silently switching established users to Auto.
+        // Migrate legacy autosaveIntervalSecs to autosaveMinutes (seconds -> minutes).
+        if let Some(fh) = v.get_mut("fileHandling").and_then(Value::as_object_mut)
+            && !fh.contains_key("autosaveMinutes")
+            && let Some(secs) = fh.remove("autosaveIntervalSecs").and_then(|s| s.as_u64())
+        {
+            fh.insert("autosaveMinutes".into(), json!((secs / 60).max(1)));
+        }
         if let Some(interface) = v.get_mut("interface").and_then(Value::as_object_mut)
             && !interface.contains_key("appearanceMode")
             && let Some(theme) = interface.get("theme").and_then(Value::as_str).and_then(Theme::parse)
@@ -1913,6 +1926,11 @@ impl Session {
     /// Batches defer colour validation until their complete candidate is staged. Returns
     /// whether colour settings were touched, including whole-section/root-object updates.
     fn set_pref(&mut self, path: &str, value: Value, validate_color: bool) -> std::result::Result<bool, String> {
+        // Legacy autosaveIntervalSecs path redirect.
+        if path == "fileHandling.autosaveIntervalSecs" {
+            let mins = value.as_f64().map(|s| (s / 60.0).round().max(1.0) as u64).unwrap_or(10);
+            return self.set_pref("fileHandling.autosaveMinutes", json!(mins), validate_color);
+        }
         if let Some(rest) = path.strip_prefix("colorSettings") {
             let mut cur = serde_json::to_value(&self.color.settings).map_err(|e| e.to_string())?;
             let rest = rest.trim_start_matches('.');
