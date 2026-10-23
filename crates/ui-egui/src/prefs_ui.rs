@@ -768,7 +768,7 @@ fn autosave(app: &mut PhotocraftApp) {
     if !on {
         return;
     }
-    let interval = minutes as f64 * 60_000.0;
+    let interval = minutes as f64 * 60.0 * 1000.0;
     if app.prefs_rt.next_autosave_ms == 0.0 || app.prefs_rt.next_autosave_ms > now + interval {
         app.prefs_rt.next_autosave_ms = now + interval;
         return;
@@ -3272,6 +3272,7 @@ mod tests {
             assert!(shown(&h, group), "an empty search shows {group}");
         }
     }
+
 
     fn app_with_store() -> (PhotocraftApp, Arc<Mutex<Option<String>>>) {
         app_with_saved(None)

@@ -993,6 +993,22 @@ fn a_wrongly_typed_value_resets_only_that_field() {
     assert_eq!(invalid[0].value, json!("ten"));
     assert_eq!(invalid[1].keys, ["shortcuts", "file.open"]);
 }
+#[test]
+fn autosave_migration_and_minutes() {
+    let mut s = Session::new();
+    s.load_prefs_json(r#"{"fileHandling": {"autosaveIntervalSecs": 599}}"#).unwrap();
+    assert_eq!(s.prefs().file_handling.autosave_minutes, 10, "599s rounds to 10m");
+
+    s.execute("prefs.set", json!({"path": "fileHandling.autosaveMinutes", "value": 15})).unwrap();
+    assert_eq!(s.prefs().file_handling.autosave_minutes, 15);
+
+    // Setting via legacy seconds path converts seconds to minutes
+    s.execute("prefs.set", json!({"path": "fileHandling.autosaveIntervalSecs", "value": 120})).unwrap();
+    assert_eq!(s.prefs().file_handling.autosave_minutes, 2);
+
+    // Non-numeric legacy update is rejected
+    assert!(s.execute("prefs.set", json!({"path": "fileHandling.autosaveIntervalSecs", "value": "ten"})).is_err());
+}
 
 #[test]
 fn a_wrongly_typed_section_or_colour_setting_resets_only_that_part() {

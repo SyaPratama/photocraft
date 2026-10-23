@@ -1413,6 +1413,13 @@ impl Preferences {
             }
             _ => value,
         };
+        let (path, value) = if path == "fileHandling.autosaveIntervalSecs" {
+            let secs = value.as_f64().ok_or_else(|| format!("invalid value for `{path}`: expected a number"))?;
+            let mins = (secs / 60.0).round().max(1.0) as u64;
+            ("fileHandling.autosaveMinutes", json!(mins))
+        } else {
+            (path, value)
+        };
         check_value(path, &value)?;
         let mut root = self.to_json();
         set_path(&mut root, path, value)?;
@@ -1884,6 +1891,14 @@ impl Session {
         }
         // Saved preferences before appearance modes had one concrete theme. Preserve its
         // appearance instead of silently switching established users to Auto.
+        // Migrate legacy autosaveIntervalSecs to autosaveMinutes (seconds -> minutes).
+        if let Some(fh) = v.get_mut("fileHandling").and_then(Value::as_object_mut)
+            && !fh.contains_key("autosaveMinutes")
+            && let Some(secs) = fh.remove("autosaveIntervalSecs").and_then(|s| s.as_f64())
+        {
+            let mins = (secs / 60.0).round().max(1.0) as u64;
+            fh.insert("autosaveMinutes".into(), json!(mins));
+        }
         if let Some(interface) = v.get_mut("interface").and_then(Value::as_object_mut)
             && !interface.contains_key("appearanceMode")
             && let Some(theme) = interface.get("theme").and_then(Value::as_str).and_then(Theme::parse)
@@ -1929,6 +1944,12 @@ impl Session {
     /// Batches defer colour validation until their complete candidate is staged. Returns
     /// whether colour settings were touched, including whole-section/root-object updates.
     fn set_pref(&mut self, path: &str, value: Value, validate_color: bool) -> std::result::Result<bool, String> {
+        // Legacy autosaveIntervalSecs path redirect.
+        if path == "fileHandling.autosaveIntervalSecs" {
+            let secs = value.as_f64().ok_or_else(|| format!("invalid value for `{path}`: expected a number"))?;
+            let mins = (secs / 60.0).round().max(1.0) as u64;
+            return self.set_pref("fileHandling.autosaveMinutes", json!(mins), validate_color);
+        }
         // The section itself or a path inside it: `colorSettingsworkingRgb`, `colorSettings.` and
         // `colorSettings..workingRgb` are none, and the authorization policy doesn't treat them as one.
         if let Some(rest) =
