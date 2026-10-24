@@ -24,6 +24,7 @@ mod alt_grab;
 pub mod analysis_ui;
 pub mod anchor_tools;
 mod ants;
+pub mod apply_color;
 pub mod artboard_tool;
 pub mod artboard_ui;
 pub(crate) mod background_redraw;
@@ -59,6 +60,7 @@ pub mod channels_panel;
 pub mod chrome_ui;
 pub mod cjk_fonts;
 pub mod clip_line_ui;
+pub mod color_panel_ui;
 pub mod color_picker_ui;
 pub mod color_range_ui;
 pub mod color_table_ui;
@@ -198,6 +200,8 @@ pub mod select_mask_view;
 pub mod served_fonts;
 pub mod shape_dialog;
 pub(crate) mod shape_fill_ui;
+mod shape_options;
+mod shape_paint_ui;
 pub mod shape_stroke_ui;
 pub mod shortcut_dispatch;
 pub mod shortcuts;
@@ -243,6 +247,7 @@ mod type_font_preview;
 pub mod type_panels_ui;
 pub mod type_tool;
 mod type_transform;
+pub mod updates_ui;
 mod variables_ui;
 pub mod vector_ui;
 pub mod view_cmds;
@@ -602,6 +607,8 @@ pub struct Services {
     /// Preferences ▸ General ▸ Beep When Done: the platform's default beep, played when a
     /// background job finishes successfully. `None` in the web build (and in tests).
     pub beep: Option<fn()>,
+    /// Starts a background check for published releases (desktop, outside Flatpak).
+    pub check_updates: Option<photocraft_engine::updates_cmds::CheckFn>,
     /// Files delivered asynchronously (web drag-and-drop): drained every frame and opened as
     /// documents.
     pub inbox: Option<Inbox>,
@@ -955,6 +962,8 @@ pub struct PhotocraftApp {
     gpu_render_state: Option<eframe::egui_wgpu::RenderState>,
     /// Why the GPU canvas was dropped (see `gpu_status::fall_back`).
     gpu_fault: Option<photocraft_gpu::Fault>,
+    /// Out-of-memory errors this session after which the GPU canvas was rebuilt by itself (#6564).
+    gpu_oom_retries: u32,
     /// Run once the first frames have rendered (see [`Self::on_started`]).
     started: Option<gpu_status::StartedHook>,
     /// Frame and canvas-upload timings (exposed via `ui.inspect`).
@@ -963,6 +972,7 @@ pub struct PhotocraftApp {
     pub stroke_trace: stroke_trace::StrokeTrace,
     /// Preferences, autosave and snapping runtime state (see `prefs_ui`, `snap_ui`).
     pub(crate) prefs_rt: prefs_ui::Runtime,
+    pub(crate) updates_rt: updates_ui::Runtime,
     /// Close, Revert or Exit parked behind the unsaved-changes prompt (see `discard_ui`).
     pub(crate) discard: Option<discard_ui::Prompt>,
     /// The Open or Save dialog in progress, and the action waiting on it (see `file_dialog`).
@@ -1006,7 +1016,8 @@ pub struct PhotocraftApp {
 }
 
 impl PhotocraftApp {
-    pub fn new(session: Session, services: Services) -> Self {
+    pub fn new(mut session: Session, mut services: Services) -> Self {
+        session.updates.check = services.check_updates.take();
         let mut app = Self {
             session,
             ui: UiState::default(),
@@ -1135,10 +1146,12 @@ impl PhotocraftApp {
             window_recovery_retry: None,
             gpu_render_state: None,
             gpu_fault: None,
+            gpu_oom_retries: 0,
             started: None,
             perf: Default::default(),
             stroke_trace: stroke_trace::StrokeTrace::from_env(),
             prefs_rt: Default::default(),
+            updates_rt: Default::default(),
             discard: None,
             file_dialog: None,
             tiff_options: None,
@@ -1486,6 +1499,7 @@ impl PhotocraftApp {
         // ... and to the document it was started on.
         crate::canvas::polygon_cancel_stale(self);
         crate::crop_ui::cancel_stale(self);
+        crate::distort_ui::cancel_stale(self);
         crate::perspective_crop_ui::cancel_stale(self);
         // A pen path under construction belongs to the document it was started on too.
         vector_ui::cancel_stale(self);
@@ -1611,7 +1625,15 @@ impl PhotocraftApp {
         }
         let import = self.services.import.as_ref().ok_or("no importer configured")?;
         let opts = photocraft_engine::jobs::import_options(self.session.prefs());
-        let (mut doc, warnings) = import(name, bytes, &opts)?;
+        let (mut doc, warnings, damaged) = if photocraft_io::is_psd(bytes) {
+            // Read PSD damage as structured information in the same decode, not by
+            // retrying an error or matching the text of a compatibility warning.
+            let (r, damaged) = photocraft_io::import_for_open(name, bytes, &opts).map_err(|e| e.to_string())?;
+            (r.document, r.warnings, damaged)
+        } else {
+            let (doc, warnings) = import(name, bytes, &opts)?;
+            (doc, warnings, false)
+        };
         // Preferences › Raw Defaults › Resolution, as the engine's open applies it.
         photocraft_engine::file_cmds::raw_defaults(&self.session, &warnings, &mut doc);
         // Edit › Color Settings policies apply on open; Ask When Opening holds the file back
@@ -1627,6 +1649,7 @@ impl PhotocraftApp {
             open_prompt::Held {
                 doc,
                 read_only: photocraft_io::affinity::is_affinity(bytes),
+                damage_pending: damaged,
                 name: name.to_string(),
                 path: path.map(str::to_string),
                 warnings: warnings.clone(),
@@ -2284,6 +2307,7 @@ impl eframe::App for PhotocraftApp {
         self.collect_screenshots(ctx);
         self.issue_screenshots(ctx);
         prefs_ui::tick(self, ctx);
+        updates_ui::tick(self, ctx);
         monitor_status::poll_frame(self, ctx, frame);
         // Control requests and persisted preferences can change the language in this frame.
         i18n::sync_context(ctx, &self.session.prefs().interface.language);
@@ -2354,6 +2378,8 @@ impl eframe::App for PhotocraftApp {
             wheel_nav::fold_legacy_pinch(ctx, raw_input);
         }
         raw_input.events.extend(self.take_synthetic_step());
+        // After the control channel's own events (`ui.type`) join the OS's, before any widget.
+        widgets::cap_text_events(&mut raw_input.events);
         self.control_click.normalize(&mut raw_input.events, cfg!(target_os = "macos"));
         // A pen held still is no touch screen's press-and-hold right click (stylus.rs).
         let pen_down = self.stylus.pen_contacts.observe(&raw_input.events);
@@ -2466,6 +2492,7 @@ impl eframe::App for PhotocraftApp {
         wide_angle_ui::show(self, &ctx);
         canvas::extra_windows(self, &ctx);
         notices::show(self, &ctx);
+        updates_ui::show(self, &ctx);
         gpu_status::show_fallback(self, &ctx);
         kys_import::show_offer(self, &ctx);
         if self.titlebar_modal_drag(chrome) {
@@ -3214,6 +3241,8 @@ mod live_retouch_tests;
 #[cfg(test)]
 mod pencil_tests;
 #[cfg(test)]
+mod tool_options_theme_tests;
+#[cfg(test)]
 mod tool_shortcut_tests;
 
 #[cfg(test)]
@@ -3235,6 +3264,8 @@ mod transform_undo_tests;
 mod transform_type_tests;
 
 #[cfg(test)]
+mod psd_open_tests;
+#[cfg(test)]
 mod save_identity_tests;
 
 #[cfg(test)]
@@ -3243,6 +3274,8 @@ mod move_auto_select_tests;
 #[cfg(test)]
 mod new_group_button_tests;
 
+#[cfg(test)]
+mod color_panel_tests;
 #[cfg(test)]
 mod color_tab_theme_tests;
 
@@ -3601,10 +3634,11 @@ mod clipboard_tests {
         app
     }
 
+    /// Paste is enabled from the clipboard service alone (no read); the explicit paste imports
+    /// the OS image, once, and centres it in the view like Photoshop does for foreign clipboard
+    /// content.
     #[test]
     fn external_clipboard_enables_and_centres_paste() {
-        // Paste is enabled from the clipboard service alone (no read); the explicit paste imports
-        // the OS image, once, and centres it like Photoshop does for foreign clipboard content.
         let (os, reads) = (OsClip::default(), Arc::default());
         let mut app = app_with_os_clipboard(&os, &reads);
         *os.lock().unwrap() = Some((4, 4, [255u8, 0, 0, 255].repeat(16)));
@@ -3612,8 +3646,9 @@ mod clipboard_tests {
         assert!(crate::menus::is_enabled(&app, "edit.paste"));
         assert!(crate::menus::is_enabled(&app, "edit.pasteSpecial.pasteInPlace"));
         assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 0, "enablement never reads the clipboard");
+        app.ui.views[0].center = [40.0, 20.0];
         let r = crate::menus::invoke(&mut app, &egui::Context::default(), "edit.paste", serde_json::json!({})).unwrap();
-        assert_ne!(r["offset"], serde_json::json!([0, 0]), "external image is centred: {r}");
+        assert_eq!(r["offset"], serde_json::json!([38, 18]), "external image is centred in the view: {r}");
         assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 1, "one read per explicit paste");
         // Without a clipboard service Paste greys until something is copied in the app.
         let mut plain = PhotocraftApp::new(Session::new(), Services::default());

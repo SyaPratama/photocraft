@@ -4638,7 +4638,7 @@ dependencies = [
 
 [[package]]
 name = "photocraft"
-version = "0.14.0"
+version = "0.15.1"
 dependencies = [
  "arboard",
  "async-io",
@@ -4673,6 +4673,7 @@ dependencies = [
  "ron",
  "serde_json",
  "tempfile",
+ "ureq",
  "winit",
  "winresource",
  "winsafe",
@@ -4684,7 +4685,7 @@ dependencies = [
 
 [[package]]
 name = "photocraft-affinity"
-version = "0.14.0"
+version = "0.15.1"
 dependencies = [
  "crc32fast",
  "flate2",
@@ -4694,11 +4695,12 @@ dependencies = [
 
 [[package]]
 name = "photocraft-algo"
-version = "0.14.0"
+version = "0.15.1"
 dependencies = [
  "photocraft-color",
  "photocraft-geom",
  "photocraft-raster",
+ "photocraft-testkit",
  "rayon",
  "rustfft",
  "serde",
@@ -4707,7 +4709,7 @@ dependencies = [
 
 [[package]]
 name = "photocraft-automation"
-version = "0.14.0"
+version = "0.15.1"
 dependencies = [
  "base64 0.22.1",
  "cap-std",
@@ -4730,7 +4732,7 @@ dependencies = [
 
 [[package]]
 name = "photocraft-cli"
-version = "0.14.0"
+version = "0.15.1"
 dependencies = [
  "photocraft-automation",
  "photocraft-codecs",
@@ -4745,7 +4747,7 @@ dependencies = [
 
 [[package]]
 name = "photocraft-cms"
-version = "0.14.0"
+version = "0.15.1"
 dependencies = [
  "moxcms",
  "rayon",
@@ -4753,7 +4755,7 @@ dependencies = [
 
 [[package]]
 name = "photocraft-codecs"
-version = "0.14.0"
+version = "0.15.1"
 dependencies = [
  "exr",
  "flate2",
@@ -4774,7 +4776,7 @@ dependencies = [
 
 [[package]]
 name = "photocraft-color"
-version = "0.14.0"
+version = "0.15.1"
 dependencies = [
  "photocraft-cms",
  "serde",
@@ -4782,9 +4784,10 @@ dependencies = [
 
 [[package]]
 name = "photocraft-compose"
-version = "0.14.0"
+version = "0.15.1"
 dependencies = [
  "criterion",
+ "photocraft-cms",
  "photocraft-color",
  "photocraft-doc",
  "photocraft-geom",
@@ -4797,7 +4800,7 @@ dependencies = [
 
 [[package]]
 name = "photocraft-doc"
-version = "0.14.0"
+version = "0.15.1"
 dependencies = [
  "photocraft-color",
  "photocraft-geom",
@@ -4808,7 +4811,7 @@ dependencies = [
 
 [[package]]
 name = "photocraft-engine"
-version = "0.14.0"
+version = "0.15.1"
 dependencies = [
  "blake3",
  "chrono",
@@ -4832,11 +4835,13 @@ dependencies = [
  "photocraft-psd",
  "photocraft-raster",
  "photocraft-raw",
+ "photocraft-testkit",
  "photocraft-text",
  "photocraft-vector",
  "rayon",
- "roxmltree 0.20.0",
+ "roxmltree 0.21.1",
  "same-file",
+ "semver",
  "serde",
  "serde_json",
  "tempfile",
@@ -4847,7 +4852,7 @@ dependencies = [
 
 [[package]]
 name = "photocraft-format"
-version = "0.14.0"
+version = "0.15.1"
 dependencies = [
  "blake3",
  "crc32fast",
@@ -4870,14 +4875,14 @@ dependencies = [
 
 [[package]]
 name = "photocraft-geom"
-version = "0.14.0"
+version = "0.15.1"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "photocraft-gpu"
-version = "0.14.0"
+version = "0.15.1"
 dependencies = [
  "half",
  "log",
@@ -4895,14 +4900,14 @@ dependencies = [
 
 [[package]]
 name = "photocraft-heif"
-version = "0.14.0"
+version = "0.15.1"
 dependencies = [
  "heic-rs",
 ]
 
 [[package]]
 name = "photocraft-io"
-version = "0.14.0"
+version = "0.15.1"
 dependencies = [
  "blake3",
  "craft-docpath",
@@ -4921,29 +4926,30 @@ dependencies = [
  "photocraft-psd",
  "photocraft-raster",
  "photocraft-raw",
+ "photocraft-testkit",
  "photocraft-text",
  "photocraft-vector",
  "proptest",
  "resvg",
- "roxmltree 0.20.0",
+ "roxmltree 0.21.1",
  "serde_json",
  "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "photocraft-ipp"
-version = "0.14.0"
+version = "0.15.1"
 
 [[package]]
 name = "photocraft-ops"
-version = "0.14.0"
+version = "0.15.1"
 dependencies = [
  "photocraft-doc",
 ]
 
 [[package]]
 name = "photocraft-paint"
-version = "0.14.0"
+version = "0.15.1"
 dependencies = [
  "photocraft-color",
  "photocraft-geom",
@@ -4954,12 +4960,13 @@ dependencies = [
 
 [[package]]
 name = "photocraft-plugins"
-version = "0.14.0"
+version = "0.15.1"
 dependencies = [
  "photocraft-color",
  "photocraft-geom",
  "photocraft-raster",
  "rayon",
+ "rustix 1.1.5",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -4969,7 +4976,7 @@ dependencies = [
 
 [[package]]
 name = "photocraft-psd"
-version = "0.14.0"
+version = "0.15.1"
 dependencies = [
  "flate2",
  "photocraft-psd",
@@ -4980,7 +4987,7 @@ dependencies = [
 
 [[package]]
 name = "photocraft-raster"
-version = "0.14.0"
+version = "0.15.1"
 dependencies = [
  "photocraft-color",
  "photocraft-geom",
@@ -4991,7 +4998,7 @@ dependencies = [
 
 [[package]]
 name = "photocraft-raw"
-version = "0.14.0"
+version = "0.15.1"
 dependencies = [
  "flate2",
  "image",
@@ -5006,7 +5013,7 @@ dependencies = [
 
 [[package]]
 name = "photocraft-tablet"
-version = "0.14.0"
+version = "0.15.1"
 dependencies = [
  "block2 0.6.2",
  "objc2 0.6.4",
@@ -5018,7 +5025,7 @@ dependencies = [
 
 [[package]]
 name = "photocraft-testkit"
-version = "0.14.0"
+version = "0.15.1"
 dependencies = [
  "memory-stats",
  "serde_json",
@@ -5026,7 +5033,7 @@ dependencies = [
 
 [[package]]
 name = "photocraft-text"
-version = "0.14.0"
+version = "0.15.1"
 dependencies = [
  "flate2",
  "parley",
@@ -5041,7 +5048,7 @@ dependencies = [
 
 [[package]]
 name = "photocraft-ui-egui"
-version = "0.14.0"
+version = "0.15.1"
 dependencies = [
  "base64 0.22.1",
  "craft-print",
@@ -5084,7 +5091,7 @@ dependencies = [
 
 [[package]]
 name = "photocraft-vector"
-version = "0.14.0"
+version = "0.15.1"
 dependencies = [
  "photocraft-color",
  "photocraft-doc",
@@ -5095,7 +5102,7 @@ dependencies = [
 
 [[package]]
 name = "photocraft-web"
-version = "0.14.0"
+version = "0.15.1"
 dependencies = [
  "eframe",
  "egui",
@@ -5117,7 +5124,7 @@ dependencies = [
 
 [[package]]
 name = "photocraft-web-boot"
-version = "0.14.0"
+version = "0.15.1"
 dependencies = [
  "flate2",
  "js-sys",
@@ -6053,12 +6060,14 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.45"
+version = "0.23.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
+checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
  "aws-lc-rs",
+ "log",
  "once_cell",
+ "ring",
  "rustls-pki-types",
  "rustls-webpki",
  "subtle",
@@ -7455,6 +7464,35 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
+name = "ureq"
+version = "3.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cde93ff05758a36a851a398a772b0b79a82fbe3c186a46f2696baaeaf84c966b"
+dependencies = [
+ "base64 0.23.1",
+ "log",
+ "percent-encoding",
+ "rustls",
+ "rustls-pki-types",
+ "rustls-platform-verifier",
+ "ureq-proto",
+ "utf8-zero",
+ "webpki-roots",
+]
+
+[[package]]
+name = "ureq-proto"
+version = "0.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "841583fc36089d7d59419568ae157f43a5a03a2e5a81ba87c77d1596ef46e922"
+dependencies = [
+ "base64 0.23.1",
+ "http",
+ "httparse",
+ "log",
+]
+
+[[package]]
 name = "url"
 version = "2.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7492,6 +7530,12 @@ dependencies = [
  "unicode-vo",
  "xmlwriter",
 ]
+
+[[package]]
+name = "utf8-zero"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b8c0a043c9540bae7c578c88f91dda8bd82e59ae27c21baca69c8b191aaf5a6e"
 
 [[package]]
 name = "utf8_iter"
@@ -7928,6 +7972,15 @@ name = "webpki-root-certs"
 version = "1.0.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b96554aa2acc8ccdb7e1c9a58a7a68dd5d13bccc69cd124cb09406db612a1c9b"
+dependencies = [
+ "rustls-pki-types",
+]
+
+[[package]]
+name = "webpki-roots"
+version = "1.0.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c1c8e20c8a38fc7d65abfe74eb7280e4aa667e8eec8bc84996d2874810748d9"
 dependencies = [
  "rustls-pki-types",
 ]
@@ -8713,7 +8766,7 @@ checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 
 [[package]]
 name = "xtask"
-version = "0.14.0"
+version = "0.15.1"
 dependencies = [
  "chrono",
  "serde",

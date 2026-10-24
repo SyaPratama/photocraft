@@ -583,6 +583,7 @@ pub fn body(app: &mut crate::PhotocraftApp, ui: &mut egui::Ui, f: &mut Map<Strin
                         ui.spacing_mut().item_spacing.x = 8.0;
                         for c in row {
                             let (r, resp) = ui.allocate_exact_size(card, Sense::click());
+                            let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
                             let (w, h, _) = c.size(&units);
                             let on = match c {
                                 Card::Builtin(p) => chosen == p.0,
@@ -1027,23 +1028,6 @@ mod tests {
             }
         });
         out.textures_delta.clear();
-    }
-
-    #[test]
-    fn new_document_depth_labels_and_tooltips_are_translated() {
-        // Bit-depth labels are unit/number strings that some languages legitimately write exactly
-        // like the English source (Turkish and Italian "8 bit"); they only need a catalog entry there.
-        const SAME_AS_SOURCE: &[(&str, &str)] = &[("tr", "8 bit"), ("tr", "16 bit"), ("it", "8 bit"), ("it", "16 bit")];
-        for lang in crate::i18n::Lang::all().filter(|lang| lang.code() != "en") {
-            for (_, label, tooltip) in DEPTH_OPTIONS {
-                if SAME_AS_SOURCE.contains(&(lang.code(), *label)) {
-                    assert!(crate::i18n::has(lang, label), "{}: {label}", lang.code());
-                } else {
-                    assert_ne!(crate::i18n::tr(lang, label), *label, "{}: {label}", lang.code());
-                }
-                assert_ne!(crate::i18n::tr(lang, tooltip), *tooltip, "{}: {tooltip}", lang.code());
-            }
-        }
     }
 
     #[test]

@@ -9,6 +9,23 @@ This is PhotoCraft's implementation of the shared
 [release playbook](release-playbook.md). User-facing names say **PhotoCraft**. Files, binaries
 and ids stay lowercase (`photocraft-<version>-<platform>-<arch>.<ext>`, `ai.storyteller.photocraft`).
 
+## In-app update checks
+
+The native desktop app checks the public GitHub latest-release endpoint in a background
+thread once at launch, with no periodic checks or automatic retries. Preferences › General › Automatically
+Check for Updates disables the startup check; Help › Check for Updates runs one manually.
+Checks use a 15-second timeout and a 1 MiB response limit, need no GitHub token, and send
+no document or personal data. Network failures are quiet during automatic checks and visible
+in the manual check window. Concurrent requests share one check.
+HTTPS validates certificates and host names against the operating system's trust store.
+
+Tags must be semantic versions (`v0.8.0` or `0.8.0`); only published stable versions newer
+than the installed workspace version trigger a notice. The notice opens the official release
+page to choose an installer; installation remains a user action. Drafts and prereleases do
+not trigger it. Web/headless frontends and the Flatpak (no network in its sandbox; `flatpak update`
+owns updates there) have no update transport. No release-workflow changes
+are required: publishing a newer stable GitHub Release makes it discoverable.
+
 ## Cutting a release
 
 1. **Bump the version** on `main`. The only place it lives is `[workspace.package] version`

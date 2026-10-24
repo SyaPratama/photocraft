@@ -133,7 +133,8 @@ pub enum Outcome {
 /// field's value is validated before the first one is applied, so a typo, an unknown field, a
 /// bad value or a bad nested key can't reply with success while nothing — or only half of it —
 /// changed (#412).
-pub const UI_SET_FIELDS: [&str; 38] = [
+pub const UI_SET_FIELDS: [&str; 39] = [
+    "updatesOpen",
     "tool",
     "strokeTrace",
     "panels",
@@ -245,7 +246,7 @@ fn merged_object<T: serde::Serialize + serde::de::DeserializeOwned>(current: &T,
     serde_json::from_value(cur).map(Some).map_err(|e| format!("{field}: {e}"))
 }
 
-/// A `ui.set` object field applied by whole-value replacement (e.g. `dock`, `colorPanel`):
+/// A `ui.set` object field applied by whole-value replacement (e.g. `dock`):
 /// unknown nested keys are rejected like [`merged_object`] does, but the value replaces the
 /// state instead of merging into it.
 fn whole_object<T: serde::Serialize + serde::de::DeserializeOwned>(current: &T, v: Option<&Value>, field: &str) -> std::result::Result<Option<T>, String> {
@@ -581,12 +582,13 @@ fn dispatch(app: &mut PhotocraftApp, ctx: &egui::Context, req: &ControlRequest) 
                 }
                 let panels = merged_object(&app.ui.panels, p.get("panels"), "panels")?;
                 let mask_target = bool_field(p, "maskTarget")?;
+                let updates_open = bool_field(p, "updatesOpen")?;
                 let vector_mask_target = bool_field(p, "vectorMaskTarget")?;
                 let selection_mode = uint_field(p, "selectionMode")?;
                 let dock_tabs = merged_object(&app.ui.dock_tabs, p.get("dockTabs"), "dockTabs")?;
                 let dock = whole_object(&app.ui.dock, p.get("dock"), "dock")?;
                 // Which chip the Color panel edits.
-                let color_panel = whole_object(&app.ui.color_panel, p.get("colorPanel"), "colorPanel")?;
+                let color_panel = merged_object(&app.ui.color_panel, p.get("colorPanel"), "colorPanel")?;
                 let dock_width = f32_field(p, "dockWidth")?;
                 let zoom = f32_field(p, "zoom")?;
                 let rotation = f32_field(p, "rotation")?;
@@ -746,6 +748,9 @@ fn dispatch(app: &mut PhotocraftApp, ctx: &egui::Context, req: &ControlRequest) 
                     app.ui.properties_layer = None;
                     app.ui.vector_mask_target &= !m;
                     app.sync_mask_targets();
+                }
+                if let Some(open) = updates_open {
+                    app.ui.updates_open = open;
                 }
                 if let Some(m) = vector_mask_target {
                     app.ui.vector_mask_target = m;
@@ -1394,6 +1399,8 @@ pub fn inspect(app: &PhotocraftApp, ctx: &egui::Context) -> Value {
         "status": app.ui.status,
         "statusError": app.ui.status_error,
         "notices": app.ui.notices,
+        "updatesOpen": app.ui.updates_open,
+        "updates": {"supported": app.session.updates.check.is_some(), "currentVersion": photocraft_engine::build_info::VERSION, "result": app.session.updates.status},
         "gpuFallbackNotice": app.ui.gpu_fallback_notice,
         "kysOffer": app.ui.kys_offer,
         "frame": app.frame,
@@ -2348,17 +2355,17 @@ mod tests {
     }
 
     #[test]
-    fn ui_set_color_panel_slider_mode() {
-        use crate::state::ColorPanelSliderMode;
+    fn ui_set_color_panel_mode() {
+        use crate::state::ColorPanelMode;
         let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
         let ctx = egui::Context::default();
-        assert_eq!(app.ui.color_panel.slider_mode, ColorPanelSliderMode::Hsb);
-        assert_eq!(call(&mut app, &ctx, "ui.set", json!({"colorPanel": {"slider_mode": "rgb"}}))["ok"], true);
-        assert_eq!(app.ui.color_panel.slider_mode, ColorPanelSliderMode::Rgb);
-        assert_eq!(call(&mut app, &ctx, "ui.set", json!({"colorPanel": {"slider_mode": "hsb"}}))["ok"], true);
-        assert_eq!(app.ui.color_panel.slider_mode, ColorPanelSliderMode::Hsb);
-        assert_eq!(call(&mut app, &ctx, "ui.set", json!({"colorPanel": {"slider_mode": "cmyk"}}))["ok"], false);
-        assert_eq!(app.ui.color_panel.slider_mode, ColorPanelSliderMode::Hsb);
+        assert_eq!(app.ui.color_panel.mode, ColorPanelMode::HueCube);
+        assert_eq!(call(&mut app, &ctx, "ui.set", json!({"colorPanel": {"mode": "rgbSliders"}}))["ok"], true);
+        assert_eq!(app.ui.color_panel.mode, ColorPanelMode::RgbSliders);
+        assert_eq!(call(&mut app, &ctx, "ui.set", json!({"colorPanel": {"mode": "hsbSliders"}}))["ok"], true);
+        assert_eq!(app.ui.color_panel.mode, ColorPanelMode::HsbSliders);
+        assert_eq!(call(&mut app, &ctx, "ui.set", json!({"colorPanel": {"mode": "nope"}}))["ok"], false);
+        assert_eq!(app.ui.color_panel.mode, ColorPanelMode::HsbSliders);
     }
 
     #[test]

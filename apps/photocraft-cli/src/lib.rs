@@ -32,9 +32,10 @@ USAGE:
       only Gray and CMYK shrink) or progressive.
   photocraft-cli info <file> [--compact]
       Print the document as JSON (size, mode, depth, layer tree).
-  photocraft-cli run (<file> | --new <json>) --cmd <id> [--params <json>] [--cmd …] [--out <file>] [--format <ext>] [--quality <1-100>] [--tiff-layers] [--tiff-compression <none|lzw|zip>] [--tga-bits <24|32>] [--dpx-bits <8|10|12|16>] [--dds-compression <none|bc1|bc2|bc3>] [--dds-mipmaps] [--jpeg-format <baseline|optimized|progressive>]
+  photocraft-cli run (<file> | --new <json>) --cmd <id> [--params <json>] [--cmd …] [--out <file>] [--format <ext>] [--quality <1-100>] [--in-place] [--tiff-layers] [--tiff-compression <none|lzw|zip>] [--tga-bits <24|32>] [--dpx-bits <8|10|12|16>] [--dds-compression <none|bc1|bc2|bc3>] [--dds-mipmaps] [--jpeg-format <baseline|optimized|progressive>]
       Open a file, run engine commands in order, save the result. Each --params
-      applies to the preceding --cmd. Prints each command's JSON result.
+      applies to the preceding --cmd. Prints each command's JSON result. An --out that is the
+      <file> is refused, as the result would replace the original; --in-place allows it.
   photocraft-cli batch --actions <actions.json|set.atn> [--action <name>] --in <dir> --out <dir> [--format <ext>] [--quality <1-100>] [--in-place] [--tiff-layers] [--tiff-compression <none|lzw|zip>] [--tga-bits <24|32>] [--dpx-bits <8|10|12|16>] [--dds-compression <none|bc1|bc2|bc3>] [--dds-mipmaps] [--jpeg-format <baseline|optimized|progressive>]
       Apply an action list to every image in a directory. A Photoshop Actions file (.atn) is a
       set: its action --action names plays, as below. JSON steps are [id, params] pairs,
@@ -51,15 +52,20 @@ USAGE:
   photocraft-cli mcp [--bridge <127.0.0.1:port>] [--control-token <64-hex> | --control-token-file <path>]
       [--automation-read-root <dir>] [--automation-write-root <dir>]
       Run the MCP server on stdio (headless engine, or bridge to a running `photocraft --control <port>`).
+      Headless: each root grants that direction of file access; an omitted root denies it.
+      Prefer absolute root paths in MCP client configurations.
+      Bridge: set roots on the desktop app; CLI root flags are rejected. Explicit token flags
+      require --bridge; credentials can also use PHOTOCRAFT_CONTROL_TOKEN or PHOTOCRAFT_CONTROL_TOKEN_FILE.
   photocraft-cli serve [--port <port>] [--control-token <64-hex> | --control-token-file <path>]
       [--automation-read-root <dir>] [--automation-write-root <dir>]
       Keep one headless session open and answer JSON lines ({\"id\",\"method\",\"params\"}) on stdio,
       or on 127.0.0.1:<port>. Methods: engine.execute, jobs.list/cancel, engine.commands,
       doc.open/new/place/save/exportLayers/exportDataSets/importDataSets/inspect/render/select/close, session.list, batch, methods
       (docs/control-protocol.md#headless-server).
+      Explicit token flags require --port. Stdio needs no control token.
 
   photocraft-cli <subcommand> --help (or -h) prints this text. A flag the subcommand doesn't take is
-  an error.
+  an error. mcp and serve take no positional arguments; their options cannot be repeated or empty.
 ";
 
 struct Args {
@@ -99,7 +105,7 @@ const SUBCOMMANDS: &[Subcommand] = &[
             "--tiff-compression",
             "--jpeg-format",
         ],
-        bare: &["--tiff-layers", "--dds-mipmaps"],
+        bare: &["--in-place", "--tiff-layers", "--dds-mipmaps"],
         run: run_cmds,
     },
     Subcommand {
@@ -154,7 +160,12 @@ fn parse(sub: &Subcommand, args: &[String]) -> Result<Option<Args>, String> {
             }
             a.flags.push((k.to_owned(), Some(v.to_owned())));
         } else if sub.values.contains(&s.as_str()) {
-            let v = args.get(i + 1).ok_or_else(|| format!("{s} needs a value"))?;
+            // A flag where the value should be is a missing value, not the value; help still wins.
+            let v = args.get(i + 1);
+            if v.is_some_and(|v| v == "--help" || v == "-h") {
+                return Ok(None);
+            }
+            let v = v.filter(|v| !v.starts_with("--")).ok_or_else(|| format!("{s} needs a value"))?;
             a.flags.push((s.clone(), Some(v.clone())));
             i += 1;
         } else if sub.bare.contains(&s.as_str()) {
@@ -166,7 +177,41 @@ fn parse(sub: &Subcommand, args: &[String]) -> Result<Option<Args>, String> {
         }
         i += 1;
     }
+    validate_server_args(sub.name, &a)?;
     Ok(Some(a))
+}
+
+/// Refuse launch options that would otherwise be silently ignored. In particular, bridge
+/// roots belong to the desktop process: accepting them here promises authority we cannot set.
+fn validate_server_args(sub: &str, a: &Args) -> R {
+    if !matches!(sub, "mcp" | "serve") {
+        return Ok(());
+    }
+    if !a.positional.is_empty() {
+        return Err(format!("{sub} does not take positional arguments"));
+    }
+    let mut seen = std::collections::HashSet::new();
+    for (flag, value) in &a.flags {
+        if !seen.insert(flag) {
+            return Err(format!("{flag} may only be specified once"));
+        }
+        if value.as_deref().is_none_or(str::is_empty) {
+            return Err(format!("{flag} needs a non-empty value"));
+        }
+    }
+    if a.has("--control-token") && a.has("--control-token-file") {
+        return Err("use either --control-token or --control-token-file, not both".into());
+    }
+    let transport = if sub == "mcp" { "--bridge" } else { "--port" };
+    for flag in ["--control-token", "--control-token-file"] {
+        if a.has(flag) && !a.has(transport) {
+            return Err(format!("{flag} requires {transport}"));
+        }
+    }
+    if sub == "mcp" && a.has("--bridge") && (a.has("--automation-read-root") || a.has("--automation-write-root")) {
+        return Err("configure automation roots on the desktop app; --automation-read-root and --automation-write-root require headless MCP mode".into());
+    }
+    Ok(())
 }
 
 impl Args {
@@ -373,6 +418,10 @@ fn run_cmds(a: &Args, out: &mut dyn Write, err: &mut dyn Write) -> R {
     let mut reported_fonts = std::collections::HashSet::<String>::new();
     match (a.positional.as_slice(), a.get("--new")) {
         ([file], None) => {
+            // Refused before the file is read or any command runs.
+            if let Some(out) = a.get("--out") {
+                refuse_overwriting_input(a, file, out)?;
+            }
             let o = h.open(Path::new(file)).map_err(|e| e.to_string())?;
             let ws: Vec<String> = serde_json::from_value(o["warnings"].clone()).unwrap_or_default();
             reported_fonts.extend(ws.iter().cloned());

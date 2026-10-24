@@ -56,6 +56,12 @@ fn every_subcommand_answers_help() {
             assert!(out.contains("USAGE") && out.contains("photocraft-cli batch"), "{sub} {help}: {out}");
         }
     }
+    // Help where a flag's value should be is still help, not a missing value or a file named `-h`.
+    for args in [&["run", "x.png", "--out", "--help"][..], &["commands", "--filter", "-h"], &["mcp", "--bridge", "-h"], &["serve", "--port", "--help"]] {
+        let o = bin().current_dir(&d).args(args).stdin(Stdio::null()).output().unwrap();
+        assert_eq!(o.status.code(), Some(0), "{args:?}: {}", String::from_utf8_lossy(&o.stderr));
+        assert!(String::from_utf8_lossy(&o.stdout).contains("USAGE"), "{args:?}");
+    }
     assert_eq!(std::fs::read_dir(&d).unwrap().count(), 0, "help wrote nothing");
 }
 
@@ -87,6 +93,22 @@ fn unknown_flags_are_usage_errors() {
     let o = bin().args(["commands", "--json=yes"]).output().unwrap();
     assert_eq!(o.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&o.stderr).contains("--json takes no value"));
+    // A flag can't be a value: a missing value is reported, not filled with the next flag.
+    let o = bin()
+        .args(["batch", "--actions"])
+        .arg(&actions)
+        .arg("--in")
+        .arg(&input)
+        .arg("--out")
+        .arg(&out_dir)
+        .args(["--format", "--quality", "80"])
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("--format needs a value"));
+    assert!(!out_dir.exists(), "nothing written");
+    // `--flag=value` still passes a value that starts with `--`.
+    ok(bin().args(["commands", "--filter=--json"]));
     // Every flag still works in both forms.
     let (out, _) = ok(bin().args(["commands", "--json", "--filter=gaussian"]));
     assert!(out.contains("filter.blur.gaussianBlur"), "{out}");
@@ -103,6 +125,81 @@ fn unknown_flags_are_usage_errors() {
     assert!(out_dir.join("a.jpg").exists());
     let (out, _) = ok(bin().arg("info").arg(input.join("a.png")).arg("--compact"));
     assert!(!out.trim().contains('\n'), "compact JSON is one line");
+}
+
+fn server_usage_error(args: &[&str], expected: &str) {
+    let o = bin().args(args).env_remove("PHOTOCRAFT_CONTROL_TOKEN").env_remove("PHOTOCRAFT_CONTROL_TOKEN_FILE").stdin(Stdio::null()).output().unwrap();
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert_eq!(o.status.code(), Some(2), "{args:?}: {err}");
+    assert!(o.stdout.is_empty(), "usage errors must leave protocol stdout empty: {args:?}");
+    assert!(err.contains(expected), "{args:?}: expected {expected:?} in {err}");
+}
+
+#[test]
+fn server_modes_reject_ignored_or_conflicting_options() {
+    for sub in ["mcp", "serve"] {
+        server_usage_error(&[sub, "stray.psd"], "does not take positional arguments");
+        for flag in ["--control-token", "--control-token-file"] {
+            server_usage_error(&[sub, flag, "unused"], if sub == "mcp" { "requires --bridge" } else { "requires --port" });
+        }
+        for flag in ["--automation-read-root", "--automation-write-root"] {
+            server_usage_error(&[sub, flag, ".", flag, "."], "may only be specified once");
+            server_usage_error(&[sub, &format!("{flag}=")], "needs a non-empty value");
+            server_usage_error(&[sub, flag, "--automation-write-root", "."], &format!("{flag} needs a value"));
+        }
+        let transport = if sub == "mcp" { "--bridge" } else { "--port" };
+        for flag in [transport, "--control-token", "--control-token-file"] {
+            server_usage_error(&[sub, flag, "one", &format!("{flag}=two")], "may only be specified once");
+            server_usage_error(&[sub, flag, ""], "needs a non-empty value");
+        }
+        server_usage_error(
+            &[sub, transport, "7878", "--control-token", "unused", "--control-token-file", "unused"],
+            "use either --control-token or --control-token-file",
+        );
+    }
+    for flag in ["--automation-read-root", "--automation-write-root"] {
+        server_usage_error(&["mcp", "--bridge", "127.0.0.1:7878", flag, "."], "configure automation roots on the desktop app");
+    }
+}
+
+/// Each launch line would, before validation, have started a TCP server and written the token file.
+#[test]
+fn server_validation_does_not_consume_stdio_or_create_files() {
+    let d = tmp("server-validation");
+    let token = d.join("must-not-be-created.token");
+    let other = d.join("other.token");
+    let token_flag = format!("--control-token-file={}", token.display());
+    let other_flag = format!("--control-token-file={}", other.display());
+    for tail in [&["stray"][..], &["--automation-read-root", ".", "--automation-read-root", "."], &["--port", "0"], &[&other_flag]] {
+        let mut child = bin()
+            .current_dir(&d)
+            .args(["serve", "--port", "0", &token_flag])
+            .args(tail)
+            .env_remove("PHOTOCRAFT_CONTROL_TOKEN")
+            .env_remove("PHOTOCRAFT_CONTROL_TOKEN_FILE")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        // Keep stdin open: invalid launch arguments must fail before starting a server.
+        let input = child.stdin.take().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while child.try_wait().unwrap().is_none() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        if child.try_wait().unwrap().is_none() {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("{tail:?}: invalid configuration started a server");
+        }
+        drop(input);
+        let o = child.wait_with_output().unwrap();
+        assert_eq!(o.status.code(), Some(2), "{tail:?}: {}", String::from_utf8_lossy(&o.stderr));
+        assert!(o.stdout.is_empty(), "{tail:?}");
+        assert!(!token.exists() && !other.exists(), "{tail:?}: validation must happen before creating credentials");
+    }
+    std::fs::remove_dir_all(d).unwrap();
 }
 
 #[test]
@@ -561,6 +658,46 @@ fn tga_bits_choose_the_targa_depth() {
         assert!(String::from_utf8_lossy(&o.stderr).contains(&format!("bad --tga-bits `{bad}`: expected 24 or 32")), "--tga-bits {bad}");
         assert!(!out.exists(), "--tga-bits {bad} wrote a file");
     }
+}
+
+/// #7437: `run <file> --out` to that same file, however `--out` is spelt, is refused before the
+/// file is read or any command runs, unless `--in-place` asks for it (as `batch` does, #492).
+#[test]
+fn run_refuses_to_write_over_its_input() {
+    let d = tmp("run-in-place");
+    write_png(&d.join("in.png"), 8, 4, 7);
+    let before = std::fs::read(d.join("in.png")).unwrap();
+    let run = |out: &Path, extra: &[&str]| {
+        bin().current_dir(&d).args(["run", "in.png", "--cmd", "image.adjustments.invert", "--out"]).arg(out).args(extra).output().unwrap()
+    };
+    let mut outs = vec![PathBuf::from("in.png"), PathBuf::from("./in.png"), d.join("in.png"), d.join(".").join("in.png")];
+    std::fs::hard_link(d.join("in.png"), d.join("hard.png")).unwrap();
+    outs.push(PathBuf::from("hard.png"));
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(d.join("in.png"), d.join("soft.png")).unwrap();
+        outs.push(PathBuf::from("soft.png"));
+    }
+    for out in &outs {
+        for extra in [&[][..], &["--format", "png"][..]] {
+            let o = run(out, extra);
+            let (stdout, err) = (String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+            assert_eq!(o.status.code(), Some(1), "--out {} {extra:?}: {err}", out.display());
+            assert!(err.contains("is the input file") && err.contains("--in-place"), "{err}");
+            assert!(stdout.is_empty(), "--out {} {extra:?} ran commands: {stdout}", out.display());
+            assert_eq!(std::fs::read(d.join("in.png")).unwrap(), before, "--out {} {extra:?} changed the original", out.display());
+        }
+    }
+    // Another file is written as before, leaving the original alone.
+    ok(bin().current_dir(&d).args(["run", "in.png", "--cmd", "image.adjustments.invert", "--out", "out.png"]));
+    assert!(d.join("out.png").is_file());
+    assert_eq!(std::fs::read(d.join("in.png")).unwrap(), before);
+    // `--in-place` opts in: the inverted result replaces the original, which still opens.
+    ok(bin().current_dir(&d).args(["run", "in.png", "--cmd", "image.adjustments.invert", "--out", "in.png", "--in-place"]));
+    assert_ne!(std::fs::read(d.join("in.png")).unwrap(), before, "--in-place left the original unchanged");
+    let (out, _) = ok(bin().current_dir(&d).args(["info", "in.png", "--compact"]));
+    let info: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!((info["width"].as_u64(), info["height"].as_u64()), (Some(8), Some(4)), "{info}");
 }
 
 /// `--jpeg-format` picks the JPEG's scans: progressive writes a progressive frame (SOF2). One it

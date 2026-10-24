@@ -108,6 +108,7 @@ pub mod retouch_cmds;
 pub mod sample_cmds;
 pub mod sampler_cmds;
 pub mod select_extra_cmds;
+pub mod select_mask_edits;
 pub mod selection_cmds;
 pub mod shell_commands;
 pub mod shortcut_sets;
@@ -117,17 +118,20 @@ pub mod smartselect_cmds;
 pub mod snap;
 pub mod solid_fill_cmds;
 pub mod stamp_cmds;
+pub mod style_asl_cmds;
 pub mod swatch_cmds;
 pub mod symmetry_cmds;
 mod timeline_cmds;
 pub mod transform_cmds;
 mod trap_cmds;
+pub mod type_area_cmds;
 pub mod type_caret_cmds;
 pub mod type_cmds;
 pub mod type_extra_cmds;
 pub mod type_mask_cmds;
 pub mod type_spell_cmds;
 pub mod type_styles_cmds;
+pub mod updates_cmds;
 mod variables_cmds;
 pub use variables_cmds::{export_data_sets_with, import_data_sets_text};
 pub mod vector_cmds;
@@ -492,6 +496,8 @@ pub struct Session {
     color_restrict: Option<usize>,
     /// Edit › Preferences, keyboard shortcuts, menu and toolbar customisation (see `prefs`).
     pub prefs: prefs::PrefsStore,
+    /// Release checks use an injected platform transport; no network I/O in the engine.
+    pub updates: updates_cmds::Updates,
     /// Edit menu state: Fade source, custom shape library (see `edit_menu_cmds`).
     pub edit_state: edit_menu_cmds::EditState,
     /// The pattern library (Window › Patterns; see `pattern.*`).

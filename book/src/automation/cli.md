@@ -64,3 +64,8 @@ layers because that would lose their group's blending semantics.
 Paths supplied to the current CLI are ordinary operating-system paths. The CLI does not restrict them to a workspace root. Batch output creates the requested output directory, and save operations may create parent directories. `batch` refuses an output directory that is its input directory (the results would replace the originals) unless `--in-place` is given. Run untrusted action files only in an appropriately isolated account or environment.
 
 CLI parsing reports malformed flags and JSON as errors, and a flag the subcommand doesn't take (a typo such as `--fromat`) is a usage error (exit status 2) rather than being ignored. It is not a security policy layer. Engine commands remain responsible for validating their own parameters.
+
+`mcp` and `serve` reject positional arguments, repeated options, missing or empty values and
+options for the wrong mode before starting a server. Explicit control-token flags require
+`mcp --bridge` or `serve --port`. Configure automation roots on the desktop process when using
+bridge mode; the CLI rejects root flags there. See the [MCP launch guide](mcp.md) for examples.

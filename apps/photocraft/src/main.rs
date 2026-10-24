@@ -74,6 +74,7 @@ mod single_instance;
 // Tablet support (macOS AppKit monitor, Linux X11/Wayland, Windows barrel button).
 mod tablet;
 mod ui_state;
+mod updates;
 mod window_frame;
 
 use photocraft_engine::Session;
