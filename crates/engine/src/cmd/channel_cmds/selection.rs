@@ -144,21 +144,25 @@ fn selection_from(doc: &Document, ch: &AlphaChannel) -> Option<Surface> {
 }
 
 pub(super) fn quick_mask(s: &mut Session, p: &Value) -> Result<Value> {
-    let on = s.active().ok_or(EngineError::NoDocument)?.doc.quick_mask.is_some();
+    let st = s.active().ok_or(EngineError::NoDocument)?;
+    let on = st.doc.quick_mask.is_some() && !st.channel_view.quick_mask_hidden;
     let want = p.get("on").and_then(Value::as_bool).unwrap_or(!on);
     if want == on {
         return Ok(json!({ "quickMask": on }));
     }
     let opts = s.quick_mask_options;
     if want {
-        s.edit("Edit in Quick Mask", |doc, _| {
-            doc.quick_mask = Some(quick_mask_from(doc, &opts));
-            doc.quick_mask_unselected = doc.selection.is_none();
+        let target = st.channel_view.target.clone();
+        s.edit("Edit in Quick Mask", |doc, _st| {
+            if doc.quick_mask.is_none() {
+                doc.quick_mask = Some(quick_mask_from(doc, &opts));
+                doc.quick_mask_unselected = doc.selection.is_none();
+            }
             doc.selection = None;
             Ok(())
         })?;
         if let Some(st) = s.active_mut() {
-            st.channel_view.target = ChannelTarget::Composite;
+            st.channel_view.target = target;
             st.channel_view.quick_mask_hidden = false;
         }
     } else {
