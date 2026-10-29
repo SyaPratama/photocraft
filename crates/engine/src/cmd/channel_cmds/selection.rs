@@ -154,13 +154,7 @@ pub(super) fn quick_mask(s: &mut Session, p: &Value) -> Result<Value> {
     let prior_target = st.channel_view.target.clone();
     if want {
         s.edit("Edit in Quick Mask", |doc, _st| {
-            if let Some(q) = &doc.quick_mask {
-                // Reconcile current selection with existing mask before clearing
-                let area = doc.bounds();
-                let old_vals = read_plane(&q.surface, area);
-                doc.selection = sel::combine(doc.selection.as_ref(), &old_vals, area, SelectionMode::Replace);
-                // quick_mask_unselected preserved from existing mask
-            } else {
+            if doc.quick_mask.is_none() {
                 doc.quick_mask = Some(quick_mask_from(doc, &opts));
                 doc.quick_mask_unselected = doc.selection.is_none();
             }
